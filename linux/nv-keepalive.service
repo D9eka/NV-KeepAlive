@@ -1,0 +1,13 @@
+[Unit]
+Description=NV-KeepAlive NVIDIA GPU Idle Voltage / Anti-TDR Service
+After=multi-user.target nvidia-persistenced.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/nv-keepalive --targets 0:vulkan --yield-ms 150 --quiet --log /var/log/nv-keepalive.log
+Restart=on-failure
+RestartSec=2
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

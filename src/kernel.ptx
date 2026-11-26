@@ -1,0 +1,43 @@
+.version 6.0
+.target sm_50
+.address_size 64
+
+.visible .entry keepalive_kernel(
+    .param .u64 out_ptr,
+    .param .u32 iters
+)
+{
+    .reg .pred %p<2>;
+    .reg .b32 %r<8>;
+    .reg .f32 %f<4>;
+    .reg .b64 %rd<4>;
+
+    ld.param.u64 %rd1, [out_ptr];
+    ld.param.u32 %r1, [iters];
+
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.s32 %r5, %r2, %r3, %r4;
+
+    cvt.rn.f32.u32 %f1, %r5;
+    mov.f32 %f2, 0f3F800001;
+    mov.f32 %f3, 0f3B800000;
+    mov.u32 %r6, 0;
+
+loop:
+    setp.ge.u32 %p1, %r6, %r1;
+    @%p1 bra done;
+    fma.rn.f32 %f1, %f1, %f2, %f3;
+    fma.rn.f32 %f1, %f1, %f2, %f3;
+    fma.rn.f32 %f1, %f1, %f2, %f3;
+    fma.rn.f32 %f1, %f1, %f2, %f3;
+    add.u32 %r6, %r6, 1;
+    bra loop;
+
+done:
+    mul.wide.u32 %rd2, %r5, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    st.global.f32 [%rd3], %f1;
+    ret;
+}

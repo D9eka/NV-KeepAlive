@@ -1,0 +1,11 @@
+*.log
+*.log.old
+*.pause
+*.pdb
+*.obj
+*.o
+linux/nv-keepalive
+linux/bin/
+*.zip
+.DS_Store
+Thumbs.db
