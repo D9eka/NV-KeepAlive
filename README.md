@@ -1,4 +1,4 @@
-# NV-KeepAlive v1.0.0
+# NV-KeepAlive v1.1.0
 
 English | [Русский](README.ru.md)
 
@@ -88,11 +88,11 @@ Hardware tested: `NVIDIA CMP 40HX 16GB` (EFI-unlocked, driver `581.94`, Ryzen 5 
 
 ## Windows Installation and GUI
 
-1. Download and extract **`NV-KeepAlive-Windows-v1.0.0.zip`** from the Releases page.
-2. Double-click **`NvKeepAliveUI.exe`** (~68 KB native WPF Windows 11 Fluent Dark manager, zero external runtime dependencies).
+1. Download and extract **`NV-KeepAlive-Windows-v1.1.0.zip`** from the Releases page.
+2. Double-click **`NvKeepAliveUI.exe`** (~90 KB native WPF Windows 11 Fluent manager with automatic Light/Dark theme matching Windows, zero external runtime dependencies).
 3. In the window:
-   - Toggle language between **RU** and **EN** in the top-right corner (auto-detected from Windows locale on startup).
-   - Review detected NVIDIA GPUs and live telemetry (`PCI Bus ID`, `PCIe link`, `VRAM`, temperature, power, live daemon `CPU%`, `TDR (5m)` and `Since start`).
+   - Toggle language (**RU / EN**) and theme (**Auto / Dark / Light**) in the top-right corner; theme follows Windows settings live when set to Auto.
+   - Review detected NVIDIA GPUs and live telemetry (`PCI Bus ID`, `PCIe link`, total VRAM, live **per-GPU daemon VRAM** via Windows `GPU Process Memory`, temperature, power, live daemon `CPU%`, `TDR (5m)` and `Since start`).
    - Select **Vulkan** or **CUDA** per GPU (explicit selection, no silent fallback). If Vulkan is selected but `vulkan-1.dll` or the NVIDIA Vulkan ICD is missing, an installation guide dialog opens with direct links (LunarG Vulkan Runtime / NVIDIA driver), a live **Recheck** button, and a one-click **CUDA for all** switch.
    - Click **Install** (or **Reinstall** after changing settings) to deploy `NvKeepAlive.exe` to `%ProgramData%\NV-KeepAlive\` and register the `NV-KeepAlive` Scheduled Task (`SYSTEM`, `AtStartup` + `AtLogOn`).
    - Click **Test 25s** to verify 0 `nvlddmkm` TDR errors over 25 seconds.
@@ -102,8 +102,14 @@ Hardware tested: `NVIDIA CMP 40HX 16GB` (EFI-unlocked, driver `581.94`, Ryzen 5 
 
 ## Linux Installation
 
+**Option A — Interactive Terminal UI (`nv-keepalive-tui`, recommended):**
 ```bash
-cd linux
+sudo bash nv-keepalive-tui
+```
+Zero-dependency ANSI terminal manager (works on desktop terminals, over SSH, and in Live ISO) with live `nvidia-smi` telemetry, per-GPU `Vulkan | CUDA` selection, live daemon VRAM and `CPU%`, `NVRM: Xid` counters, built-in Vulkan install guide, 25-second anti-Xid test, and RU/EN toggle (`L`).
+
+**Option B — Scripted / CLI installer (`install-linux.sh`):**
+```bash
 sudo bash install-linux.sh
 ```
 

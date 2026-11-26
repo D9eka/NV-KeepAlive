@@ -14,8 +14,9 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - name: Compile nv-keepalive (linux-x86_64)
+      - name: Compile nv-keepalive (linux-x86_64) and syntax-check scripts
         run: |
+          bash -n linux/nv-keepalive-tui linux/install-linux.sh linux/uninstall-linux.sh
           mkdir -p linux/bin
           gcc -O2 -Wall -Wextra -pthread linux/nv_keepalive.c -ldl -o linux/bin/nv-keepalive-linux-x86_64
           strip linux/bin/nv-keepalive-linux-x86_64
@@ -70,10 +71,10 @@ jobs:
           cp windows/NvKeepAliveUI.exe windows/NvKeepAlive.exe README.md README.ru.md LICENSE dist_win/
           (cd dist_win && zip -r "../${WIN_ARCHIVE}" .)
 
-          # Linux release: prebuilt binary + installer + service + C fallback source
+          # Linux release: prebuilt binary + TUI manager + installer + service + C fallback source
           cp linux/bin/nv-keepalive-linux-x86_64 dist_lin/bin/
-          cp linux/install-linux.sh linux/uninstall-linux.sh linux/nv-keepalive.service linux/nv_keepalive.c linux/Makefile README.md README.ru.md LICENSE dist_lin/
-          chmod +x dist_lin/bin/nv-keepalive-linux-x86_64 dist_lin/install-linux.sh dist_lin/uninstall-linux.sh
+          cp linux/nv-keepalive-tui linux/install-linux.sh linux/uninstall-linux.sh linux/nv-keepalive.service linux/nv_keepalive.c linux/Makefile README.md README.ru.md LICENSE dist_lin/
+          chmod +x dist_lin/bin/nv-keepalive-linux-x86_64 dist_lin/nv-keepalive-tui dist_lin/install-linux.sh dist_lin/uninstall-linux.sh
           tar -czf "${LIN_ARCHIVE}" -C dist_lin .
 
           sha256sum "${WIN_ARCHIVE}" "${LIN_ARCHIVE}" > SHA256SUMS.txt

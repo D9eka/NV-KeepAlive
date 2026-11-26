@@ -8,6 +8,8 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 Makefile text eol=lf
+nv-keepalive-tui text eol=lf
+*.ico binary
 
 *.bat text eol=crlf
 *.cmd text eol=crlf

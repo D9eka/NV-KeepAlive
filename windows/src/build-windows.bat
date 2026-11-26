@@ -13,6 +13,7 @@ if errorlevel 1 exit /b 1
 
 echo [2/2] Building NvKeepAliveUI.exe...
 "%CSC%" /nologo /utf8output /codepage:65001 /optimize+ /platform:x64 /target:winexe ^
+    /win32icon:"%~dp0nvkeepalive.ico" ^
     /r:"%WPF%\PresentationFramework.dll" ^
     /r:"%WPF%\PresentationCore.dll" ^
     /r:"%WPF%\WindowsBase.dll" ^

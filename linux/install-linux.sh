@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_BIN="/usr/local/bin/nv-keepalive"
+TUI_DST="/usr/local/bin/nv-keepalive-tui"
 PREBUILT_BIN="${SCRIPT_DIR}/bin/nv-keepalive-linux-x86_64"
 UNIT_DST="/etc/systemd/system/nv-keepalive.service"
 
@@ -137,6 +138,10 @@ fi
 
 echo ""
 echo "[3/4] Installing systemd service (targets=${TARGETS_ARG})..."
+if [[ -f "${SCRIPT_DIR}/nv-keepalive-tui" ]]; then
+    cp -f "${SCRIPT_DIR}/nv-keepalive-tui" "${TUI_DST}"
+    chmod 755 "${TUI_DST}"
+fi
 sed "s|--targets 0:vulkan|--targets ${TARGETS_ARG}|g" "${SCRIPT_DIR}/nv-keepalive.service" > "${UNIT_DST}"
 systemctl daemon-reload
 systemctl enable --now nv-keepalive.service
@@ -149,6 +154,7 @@ echo ""
 systemctl --no-pager status nv-keepalive.service || true
 echo ""
 echo "Useful commands:"
+echo "  sudo nv-keepalive-tui                # interactive TUI manager"
 echo "  nv-keepalive --status"
 echo "  sudo touch /run/nv-keepalive.pause   # pause"
 echo "  sudo rm -f /run/nv-keepalive.pause   # resume"

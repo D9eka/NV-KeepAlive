@@ -1,0 +1,620 @@
+#!/usr/bin/env bash
+# NV-KeepAlive v1.1.0 - Interactive Linux Terminal Manager (TUI)
+# Zero external dependencies (pure Bash + ANSI). Works on desktop terminals, SSH, and Live ISO.
+set -u
+
+VERSION="1.1.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TARGET_BIN="/usr/local/bin/nv-keepalive"
+TUI_DST="/usr/local/bin/nv-keepalive-tui"
+UNIT_DST="/etc/systemd/system/nv-keepalive.service"
+PAUSE_FILE="/run/nv-keepalive.pause"
+LOG_FILE="/var/log/nv-keepalive.log"
+
+if [[ $EUID -ne 0 ]]; then
+    echo "Please run as root: sudo bash $0"
+    exit 1
+fi
+
+# Language auto-detect (RU / EN)
+LANG_MODE="en"
+if [[ "${LC_ALL:-${LANG:-}}" == ru* ]]; then
+    LANG_MODE="ru"
+fi
+
+# ANSI colors
+C_RST=$'\033[0m'
+C_BOLD=$'\033[1m'
+C_DIM=$'\033[2m'
+C_CYAN=$'\033[96m'
+C_GREEN=$'\033[92m'
+C_YELLOW=$'\033[93m'
+C_RED=$'\033[91m'
+C_INV=$'\033[7m'
+C_BG_SEL=$'\033[48;5;236m'
+
+# State arrays
+declare -a GPU_IDX GPU_PCI GPU_NAME GPU_DEV GPU_VRAM GPU_MINING GPU_HAS_VK GPU_HAS_CU
+declare -a GPU_SEL GPU_BACKEND GPU_USED GPU_TOT GPU_TEMP GPU_PWR GPU_PCIE GPU_FIX_VRAM
+declare -A APPLIED_MAP
+GPU_COUNT=0
+CURSOR=0
+VK_STATUS="OK"
+SVC_INSTALLED=0
+SVC_RUNNING=0
+SVC_PAUSED=0
+SVC_PID=""
+SVC_START_EPOCH="$(date +%s)"
+LIVE_CPU="-"
+LIVE_FIX_VRAM="-"
+XID_5M=0
+XID_START=0
+STATUS_MSG=""
+TEST_LAST_LINE=""
+TEST_LAST_OK=1
+
+T() { [[ "${LANG_MODE}" == "ru" ]] && printf '%s' "$1" || printf '%s' "$2"; }
+
+find_daemon_bin() {
+    if [[ -x "${TARGET_BIN}" ]]; then echo "${TARGET_BIN}"; return; fi
+    if [[ -x "${SCRIPT_DIR}/bin/nv-keepalive-linux-x86_64" ]]; then echo "${SCRIPT_DIR}/bin/nv-keepalive-linux-x86_64"; return; fi
+    if [[ -x "${SCRIPT_DIR}/nv-keepalive" ]]; then echo "${SCRIPT_DIR}/nv-keepalive"; return; fi
+    echo ""
+}
+
+ensure_binary_installed() {
+    local arch prebuilt cc_bin
+    arch="$(uname -m)"
+    prebuilt="${SCRIPT_DIR}/bin/nv-keepalive-linux-x86_64"
+    if [[ "${arch}" == "x86_64" && -f "${prebuilt}" ]]; then
+        chmod 755 "${prebuilt}" 2>/dev/null || true
+        if "${prebuilt}" --help >/dev/null 2>&1; then
+            cp -f "${prebuilt}" "${TARGET_BIN}"
+            chmod 755 "${TARGET_BIN}"
+            return 0
+        fi
+    fi
+    if [[ -f "${SCRIPT_DIR}/nv_keepalive.c" ]]; then
+        cc_bin=""
+        if command -v gcc >/dev/null 2>&1; then cc_bin="gcc"
+        elif command -v cc >/dev/null 2>&1; then cc_bin="cc"
+        elif command -v clang >/dev/null 2>&1; then cc_bin="clang"
+        fi
+        if [[ -n "${cc_bin}" ]]; then
+            "${cc_bin}" -O2 -Wall -Wextra -pthread "${SCRIPT_DIR}/nv_keepalive.c" -ldl -o "${TARGET_BIN}" 2>/dev/null && {
+                chmod 755 "${TARGET_BIN}"
+                return 0
+            }
+        fi
+    fi
+    [[ -x "${TARGET_BIN}" ]] && return 0
+    return 1
+}
+
+norm_pci() {
+    local s="${1,,}"
+    s="${s// /}"
+    if [[ ${#s} -eq 16 && "${s:8:1}" == ":" ]]; then s="${s:4}"; fi
+    printf '%s' "${s}"
+}
+
+check_vulkan() {
+    local bin out
+    bin="$(find_daemon_bin)"
+    if [[ -z "${bin}" ]]; then VK_STATUS="NO_LOADER"; return; fi
+    out="$("${bin}" --check-vulkan 2>/dev/null || true)"
+    if [[ "${out}" == OK* ]]; then VK_STATUS="OK"
+    elif [[ "${out}" == *NO_LOADER* ]]; then VK_STATUS="NO_LOADER"
+    else VK_STATUS="NO_NVIDIA_ICD"
+    fi
+}
+
+read_installed_targets() {
+    APPLIED_MAP=()
+    SVC_INSTALLED=0
+    [[ -f "${UNIT_DST}" ]] || return 0
+    SVC_INSTALLED=1
+    local exec_line targ tok idx b
+    exec_line="$(grep -E '^ExecStart=' "${UNIT_DST}" | head -n1 || true)"
+    if [[ "${exec_line}" =~ --targets[[:space:]]+([^[:space:]]+) ]]; then
+        targ="${BASH_REMATCH[1]}"
+        IFS=',' read -ra toks <<< "${targ}"
+        for tok in "${toks[@]}"; do
+            if [[ "${tok}" == *:* ]]; then
+                idx="${tok%%:*}"
+                b="${tok#*:}"
+                APPLIED_MAP["${idx}"]="${b,,}"
+            fi
+        done
+    fi
+}
+
+count_xid_since() {
+    local since_arg="$1" cnt=0
+    if command -v journalctl >/dev/null 2>&1; then
+        cnt="$(journalctl -k --no-pager --since "${since_arg}" 2>/dev/null | grep -c 'NVRM: Xid' || true)"
+    fi
+    printf '%s' "${cnt:-0}"
+}
+
+probe_gpus_initial() {
+    check_vulkan
+    read_installed_targets
+
+    GPU_IDX=(); GPU_PCI=(); GPU_NAME=(); GPU_DEV=(); GPU_VRAM=()
+    GPU_MINING=(); GPU_HAS_VK=(); GPU_HAS_CU=()
+    GPU_SEL=(); GPU_BACKEND=(); GPU_USED=(); GPU_TOT=(); GPU_TEMP=(); GPU_PWR=(); GPU_PCIE=(); GPU_FIX_VRAM=()
+    GPU_COUNT=0
+
+    local bin tsv line
+    bin="$(find_daemon_bin)"
+    [[ -n "${bin}" ]] || return 0
+    tsv="$("${bin}" --list-tsv 2>/dev/null || true)"
+    [[ -n "${tsv}" ]] || return 0
+
+    local any_mining=0
+    while IFS=$'\t' read -r idx pci name dev vram mining cmp40 has_vk has_cu; do
+        [[ -n "${idx}" ]] || continue
+        GPU_IDX+=("${idx}")
+        GPU_PCI+=("${pci}")
+        GPU_NAME+=("${name}")
+        GPU_DEV+=("${dev}")
+        GPU_VRAM+=("${vram}")
+        GPU_MINING+=("${mining}")
+        GPU_HAS_VK+=("${has_vk}")
+        GPU_HAS_CU+=("${has_cu}")
+        GPU_USED+=("0")
+        GPU_TOT+=("${vram}")
+        GPU_TEMP+=("-")
+        GPU_PWR+=("-")
+        GPU_PCIE+=("")
+        GPU_FIX_VRAM+=("")
+        if [[ "${has_vk}" == "1" && "${VK_STATUS}" == "OK" ]]; then GPU_BACKEND+=("vulkan"); else GPU_BACKEND+=("cuda"); fi
+        GPU_SEL+=("1")
+        [[ "${mining}" == "1" ]] && any_mining=1
+        GPU_COUNT=$((GPU_COUNT + 1))
+    done <<< "${tsv}"
+
+    local i
+    if [[ ${#APPLIED_MAP[@]} -gt 0 ]]; then
+        for ((i=0; i<GPU_COUNT; i++)); do
+            if [[ -n "${APPLIED_MAP[${GPU_IDX[$i]}]:-}" ]]; then
+                GPU_SEL[$i]=1
+                GPU_BACKEND[$i]="${APPLIED_MAP[${GPU_IDX[$i]}]}"
+            else
+                GPU_SEL[$i]=$([[ ${GPU_COUNT} -eq 1 ]] && echo 1 || echo 0)
+            fi
+        done
+    elif [[ ${GPU_COUNT} -gt 1 && ${any_mining} -eq 1 ]]; then
+        for ((i=0; i<GPU_COUNT; i++)); do
+            GPU_SEL[$i]="${GPU_MINING[$i]}"
+        done
+    fi
+}
+
+poll_live_metrics() {
+    read_installed_targets
+    SVC_RUNNING=0
+    SVC_PAUSED=0
+    SVC_PID=""
+    LIVE_CPU="-"
+    LIVE_FIX_VRAM="-"
+
+    SVC_PID="$(pgrep -xo nv-keepalive 2>/dev/null || true)"
+    if [[ -n "${SVC_PID}" ]]; then
+        SVC_RUNNING=1
+        [[ -f "${PAUSE_FILE}" ]] && SVC_PAUSED=1
+        if [[ ${SVC_PAUSED} -eq 1 ]]; then
+            LIVE_CPU="0.00%"
+            LIVE_FIX_VRAM="0.0 MiB"
+        else
+            local raw_cpu
+            raw_cpu="$(ps -p "${SVC_PID}" -o %cpu= 2>/dev/null | tr -d ' ' || true)"
+            [[ -n "${raw_cpu}" ]] && LIVE_CPU="${raw_cpu}%"
+        fi
+    fi
+
+    # Live nvidia-smi GPU telemetry
+    declare -A smi_used smi_tot smi_temp smi_pwr smi_pcie proc_vram
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        local bus used tot temp pwr gen wid
+        while IFS=',' read -r bus used tot temp pwr gen wid; do
+            [[ -n "${bus}" ]] || continue
+            bus="$(norm_pci "${bus}")"
+            smi_used["${bus}"]="${used// /}"
+            smi_tot["${bus}"]="${tot// /}"
+            smi_temp["${bus}"]="${temp// /}"
+            pwr="${pwr// /}"; smi_pwr["${bus}"]="${pwr%%.*}"
+            smi_pcie["${bus}"]="Gen${gen// /} x${wid// /}"
+        done < <(nvidia-smi --query-gpu=pci.bus_id,memory.used,memory.total,temperature.gpu,power.draw,pcie.link.gen.max,pcie.link.width.current --format=csv,noheader,nounits 2>/dev/null || true)
+
+        if [[ ${SVC_RUNNING} -eq 1 && ${SVC_PAUSED} -eq 0 && -n "${SVC_PID}" ]]; then
+            local cpid cbus cmem sum_fix=0 any_fix=0
+            while IFS=',' read -r cpid cbus cmem; do
+                cpid="${cpid// /}"
+                [[ "${cpid}" == "${SVC_PID}" ]] || continue
+                cbus="$(norm_pci "${cbus}")"
+                cmem="${cmem// /}"
+                if [[ "${cmem}" =~ ^[0-9]+$ ]]; then
+                    proc_vram["${cbus}"]="${cmem}"
+                    sum_fix=$((sum_fix + cmem))
+                    any_fix=1
+                fi
+            done < <(nvidia-smi --query-compute-apps=pid,gpu_bus_id,used_gpu_memory --format=csv,noheader,nounits 2>/dev/null || true)
+            if [[ ${any_fix} -eq 1 ]]; then
+                LIVE_FIX_VRAM="${sum_fix} MiB"
+            fi
+        fi
+    fi
+
+    local i pci
+    for ((i=0; i<GPU_COUNT; i++)); do
+        pci="$(norm_pci "${GPU_PCI[$i]}")"
+        if [[ -n "${smi_used[${pci}]:-}" ]]; then
+            GPU_USED[$i]="${smi_used[${pci}]}"
+            GPU_TOT[$i]="${smi_tot[${pci}]}"
+            GPU_TEMP[$i]="${smi_temp[${pci}]}"
+            GPU_PWR[$i]="${smi_pwr[${pci}]}"
+            GPU_PCIE[$i]="${smi_pcie[${pci}]}"
+        fi
+        if [[ ${SVC_RUNNING} -eq 1 && ${SVC_PAUSED} -eq 1 ]]; then
+            GPU_FIX_VRAM[$i]="0"
+        elif [[ -n "${proc_vram[${pci}]:-}" ]]; then
+            GPU_FIX_VRAM[$i]="${proc_vram[${pci}]}"
+        else
+            GPU_FIX_VRAM[$i]=""
+        fi
+    done
+
+    XID_5M="$(count_xid_since "5 minutes ago")"
+    XID_START="$(count_xid_since "@${SVC_START_EPOCH}")"
+}
+
+draft_targets_spec() {
+    local i out=""
+    for ((i=0; i<GPU_COUNT; i++)); do
+        if [[ ${GPU_COUNT} -eq 1 || "${GPU_SEL[$i]}" == "1" ]]; then
+            out+="${out:+,}${GPU_IDX[$i]}:${GPU_BACKEND[$i]}"
+        fi
+    done
+    printf '%s' "${out}"
+}
+
+applied_targets_spec() {
+    local k out=""
+    for k in $(printf '%s\n' "${!APPLIED_MAP[@]}" | sort -n); do
+        out+="${out:+,}${k}:${APPLIED_MAP[$k]}"
+    done
+    printf '%s' "${out}"
+}
+
+has_pending_changes() {
+    [[ ${SVC_INSTALLED} -eq 1 && "$(draft_targets_spec)" != "$(applied_targets_spec)" ]]
+}
+
+needs_vulkan_selected() {
+    local i
+    for ((i=0; i<GPU_COUNT; i++)); do
+        if [[ (${GPU_COUNT} -eq 1 || "${GPU_SEL[$i]}" == "1") && "${GPU_BACKEND[$i]}" == "vulkan" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+show_vulkan_guide_screen() {
+    while true; do
+        printf '\033[H\033[2J'
+        printf '%s%s=== %s ===%s\n\n' "${C_BOLD}" "${C_CYAN}" "$(T 'Vulkan Runtime не обнаружен' 'Vulkan Runtime Not Found')" "${C_RST}"
+        printf '%s%s (%s)%s\n\n' "${C_YELLOW}" "$(T 'Причина: libvulkan.so.1 отсутствует или не найден NVIDIA Vulkan ICD' 'Reason: libvulkan.so.1 is missing or NVIDIA Vulkan ICD not registered')" "${VK_STATUS}" "${C_RST}"
+        printf '%s\n\n' "$(T 'Для работы лёгкого движка Vulkan (~5-20 MiB VRAM) установите Vulkan Loader:' 'To use the lightweight Vulkan backend (~5-20 MiB VRAM), install the Vulkan Loader:')"
+        printf '  Debian / Ubuntu:  %ssudo apt update && sudo apt install -y libvulkan1%s\n' "${C_BOLD}" "${C_RST}"
+        printf '  Arch Linux:       %ssudo pacman -S vulkan-icd-loader%s\n' "${C_BOLD}" "${C_RST}"
+        printf '  Fedora / RHEL:    %ssudo dnf install -y vulkan-loader%s\n\n' "${C_BOLD}" "${C_RST}"
+        printf '%s%s%s\n\n' "${C_DIM}" "$(T 'Также проверьте наличие /usr/share/vulkan/icd.d/nvidia_icd.json.' 'Also verify /usr/share/vulkan/icd.d/nvidia_icd.json exists.')" "${C_RST}"
+        printf '  %s[R]%s %s   %s[C]%s %s   %s[Esc/Q]%s %s\n' \
+            "${C_CYAN}" "${C_RST}" "$(T 'Проверить снова' 'Recheck')" \
+            "${C_CYAN}" "${C_RST}" "$(T 'CUDA для всех' 'CUDA for all')" \
+            "${C_DIM}" "${C_RST}" "$(T 'Назад' 'Back')"
+
+        local key=""
+        IFS= read -rsn1 key || true
+        case "${key,,}" in
+            r)
+                check_vulkan
+                if [[ "${VK_STATUS}" == "OK" ]]; then
+                    STATUS_MSG="$(T 'Vulkan обнаружен!' 'Vulkan detected!')"
+                    return 0
+                fi
+                ;;
+            c)
+                local i
+                for ((i=0; i<GPU_COUNT; i++)); do GPU_BACKEND[$i]="cuda"; done
+                STATUS_MSG="$(T 'Все карты переключены на CUDA (нажмите I для применения).' 'Switched all GPUs to CUDA (press I to apply).')"
+                return 0
+                ;;
+            q|$'\x1b') return 0 ;;
+        esac
+    done
+}
+
+show_log_screen() {
+    printf '\033[H\033[2J'
+    printf '%s%s=== %s ===%s\n\n' "${C_BOLD}" "${C_CYAN}" "${LOG_FILE}" "${C_RST}"
+    if [[ -f "${LOG_FILE}" ]]; then
+        tail -n 25 "${LOG_FILE}"
+    else
+        printf '%s%s%s\n' "${C_DIM}" "$(T '(журнал пока пуст)' '(log is empty)')" "${C_RST}"
+    fi
+    printf '\n%s%s%s\n' "${C_DIM}" "$(T 'Нажмите любую клавишу для возврата...' 'Press any key to return...')" "${C_RST}"
+    IFS= read -rsn1 _ || true
+}
+
+do_install_service() {
+    local spec
+    spec="$(draft_targets_spec)"
+    if [[ -z "${spec}" ]]; then
+        STATUS_MSG="$(T 'Выберите хотя бы одну видеокарту NVIDIA.' 'Select at least one NVIDIA GPU first.')"
+        return
+    fi
+    if needs_vulkan_selected && [[ "${VK_STATUS}" != "OK" ]]; then
+        show_vulkan_guide_screen
+        return
+    fi
+    if ! ensure_binary_installed; then
+        STATUS_MSG="$(T 'Ошибка: не удалось установить/скомпилировать nv-keepalive (нужен gcc).' 'Error: failed to install/compile nv-keepalive (gcc required).')"
+        return
+    fi
+    if [[ "${SCRIPT_DIR}/nv-keepalive-tui" != "${TUI_DST}" && -f "${SCRIPT_DIR}/nv-keepalive-tui" ]]; then
+        cp -f "${SCRIPT_DIR}/nv-keepalive-tui" "${TUI_DST}"
+        chmod 755 "${TUI_DST}"
+    fi
+    cat > "${UNIT_DST}" <<EOF
+[Unit]
+Description=NV-KeepAlive NVIDIA GPU Idle Voltage / Anti-TDR Service
+After=multi-user.target nvidia-persistenced.service
+
+[Service]
+Type=simple
+ExecStart=${TARGET_BIN} --targets ${spec} --yield-ms 150 --quiet --log ${LOG_FILE}
+Restart=on-failure
+RestartSec=2
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    rm -f "${PAUSE_FILE}"
+    systemctl daemon-reload
+    systemctl enable --now nv-keepalive.service >/dev/null 2>&1 || true
+    systemctl restart nv-keepalive.service >/dev/null 2>&1 || true
+    SVC_START_EPOCH="$(date +%s)"
+    sleep 1
+    STATUS_MSG="$(T "Служба установлена и запущена (--targets ${spec})." "Service installed and started (--targets ${spec}).")"
+}
+
+do_pause_toggle() {
+    if [[ ${SVC_RUNNING} -eq 0 ]]; then return; fi
+    if [[ -f "${PAUSE_FILE}" ]]; then
+        rm -f "${PAUSE_FILE}"
+        STATUS_MSG="$(T 'Пауза снята.' 'Pause cleared.')"
+    else
+        touch "${PAUSE_FILE}"
+        STATUS_MSG="$(T 'Служба поставлена на паузу.' 'Service paused.')"
+    fi
+    sleep 1
+}
+
+do_uninstall_service() {
+    systemctl disable --now nv-keepalive.service >/dev/null 2>&1 || true
+    rm -f "${UNIT_DST}" "${PAUSE_FILE}" /tmp/nv-keepalive.lock
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    STATUS_MSG="$(T 'Служба nv-keepalive удалена.' 'Service nv-keepalive removed.')"
+}
+
+do_test_25s() {
+    local spec bin temp_pid=""
+    spec="$(draft_targets_spec)"
+    if [[ -z "${spec}" ]]; then
+        STATUS_MSG="$(T 'Выберите хотя бы одну видеокарту NVIDIA.' 'Select at least one NVIDIA GPU first.')"
+        return
+    fi
+    if needs_vulkan_selected && [[ "${VK_STATUS}" != "OK" ]]; then
+        show_vulkan_guide_screen
+        return
+    fi
+    bin="$(find_daemon_bin)"
+    local t0
+    t0="$(date +%s)"
+    if [[ (${SVC_RUNNING} -eq 0 || ${SVC_PAUSED} -eq 1) && -n "${bin}" ]]; then
+        "${bin}" --targets "${spec}" --sec 26 --no-lock --quiet >/dev/null 2>&1 &
+        temp_pid=$!
+    fi
+
+    local s filled empty bar pct
+    printf '\n'
+    for ((s=1; s<=25; s++)); do
+        sleep 1
+        pct=$((s * 4))
+        filled=$((s))
+        empty=$((25 - s))
+        bar="$(printf '%*s' "${filled}" '' | tr ' ' '#')$(printf '%*s' "${empty}" '' | tr ' ' '-')"
+        printf '\r  %s[%s]%s %3d%% (%2d/25s) %s' "${C_CYAN}" "${bar}" "${C_RST}" "${pct}" "${s}" "$(T 'Проверка NVRM: Xid...' 'Checking NVRM: Xid...')"
+    done
+    printf '\n'
+    [[ -n "${temp_pid}" ]] && kill "${temp_pid}" 2>/dev/null || true
+
+    local errs
+    errs="$(count_xid_since "@${t0}")"
+    if [[ "${errs}" -eq 0 ]]; then
+        TEST_LAST_OK=1
+        TEST_LAST_LINE="$(T 'Тест пройден: 0 ошибок NVRM: Xid за 25с (защита работает)' 'Test passed: 0 NVRM: Xid errors in 25s (protection active)')"
+    else
+        TEST_LAST_OK=0
+        TEST_LAST_LINE="$(T "Обнаружено ошибок NVRM: Xid: ${errs}" "Detected NVRM: Xid errors: ${errs}")"
+    fi
+}
+
+render_main() {
+    printf '\033[H\033[2J'
+    local st_str app_sum
+    app_sum="$(applied_targets_spec)"
+    [[ -z "${app_sum}" ]] && app_sum="-"
+    if [[ ${SVC_RUNNING} -eq 1 && ${SVC_PAUSED} -eq 0 ]]; then
+        st_str="${C_GREEN}${C_BOLD}● $(T "РАБОТАЕТ (${app_sum})" "RUNNING (${app_sum})")${C_RST}"
+    elif [[ ${SVC_RUNNING} -eq 1 && ${SVC_PAUSED} -eq 1 ]]; then
+        st_str="${C_YELLOW}${C_BOLD}● $(T 'НА ПАУЗЕ' 'PAUSED')${C_RST}"
+    else
+        st_str="${C_RED}${C_BOLD}● $(T 'НЕ УСТАНОВЛЕНА' 'NOT INSTALLED')${C_RST}"
+    fi
+
+    printf '%s%sNV-KeepAlive v%s%s %s(Linux TUI)%s    %s    %s[L: %s]%s\n' \
+        "${C_BOLD}" "${C_CYAN}" "${VERSION}" "${C_RST}" "${C_DIM}" "${C_RST}" \
+        "${st_str}" "${C_CYAN}" "${LANG_MODE^^}" "${C_RST}"
+    printf '%s────────────────────────────────────────────────────────────────────────────────%s\n' "${C_DIM}" "${C_RST}"
+
+    local c_x5="${C_GREEN}" c_xs="${C_GREEN}" vk_badge
+    [[ "${XID_5M}" -gt 0 ]] && c_x5="${C_RED}"
+    [[ "${XID_START}" -gt 0 ]] && c_xs="${C_RED}"
+    if [[ "${VK_STATUS}" == "OK" ]]; then
+        vk_badge="${C_GREEN}$(T 'Доступен' 'Available')${C_RST}"
+    else
+        vk_badge="${C_YELLOW}$(T 'Не найден (B - гайд)' 'Missing (B - guide)')${C_RST}"
+    fi
+
+    printf '  %s%s%s %s%s%s  |  %s%s%s %s%s%s  |  %sCPU:%s %s%s%s  |  %sVRAM:%s %s%s%s  |  %sVulkan:%s %s\n\n' \
+        "${C_DIM}" "$(T 'Xid (5м):' 'Xid (5m):')" "${C_RST}" "${c_x5}" "${XID_5M}" "${C_RST}" \
+        "${C_DIM}" "$(T 'С запуска:' 'Since start:')" "${C_RST}" "${c_xs}" "${XID_START}" "${C_RST}" \
+        "${C_DIM}" "${C_RST}" "${C_BOLD}" "${LIVE_CPU}" "${C_RST}" \
+        "${C_DIM}" "${C_RST}" "${C_CYAN}" "${LIVE_FIX_VRAM}" "${C_RST}" \
+        "${C_DIM}" "${C_RST}" "${vk_badge}"
+
+    printf '%s%s%s\n' "${C_CYAN}" "$(T 'Видеокарты NVIDIA (PCI Bus ID):' 'NVIDIA GPUs (PCI Bus ID):')" "${C_RST}"
+    if [[ ${GPU_COUNT} -eq 0 ]]; then
+        printf '  %s%s%s\n' "${C_RED}" "$(T 'Видеокарты NVIDIA не обнаружены.' 'No NVIDIA GPUs detected.')" "${C_RST}"
+    else
+        local i mark cb id_tag mine_tag fix_part b_disp
+        for ((i=0; i<GPU_COUNT; i++)); do
+            mark=" "
+            [[ ${i} -eq ${CURSOR} ]] && mark="${C_CYAN}>${C_RST}"
+            cb=""
+            id_tag=""
+            if [[ ${GPU_COUNT} -gt 1 ]]; then
+                [[ "${GPU_SEL[$i]}" == "1" ]] && cb="${C_CYAN}[x]${C_RST} " || cb="${C_DIM}[ ]${C_RST} "
+                id_tag="${C_CYAN}[GPU ${GPU_IDX[$i]}]${C_RST} "
+            fi
+            mine_tag=""
+            [[ "${GPU_MINING[$i]}" == "1" ]] && mine_tag=" ${C_YELLOW}[CMP]${C_RST}"
+            fix_part=""
+            if [[ -n "${GPU_FIX_VRAM[$i]}" ]]; then
+                fix_part=" ${C_CYAN}($(T 'фикс' 'fix'): ${GPU_FIX_VRAM[$i]} MiB)${C_RST}"
+            fi
+            if [[ "${GPU_BACKEND[$i]}" == "vulkan" ]]; then
+                b_disp="${C_INV}${C_CYAN} Vulkan ${C_RST} ${C_DIM}CUDA${C_RST}"
+            else
+                b_disp="${C_DIM}Vulkan${C_RST} ${C_INV}${C_CYAN} CUDA ${C_RST}"
+            fi
+
+            if [[ ${i} -eq ${CURSOR} ]]; then printf '%s' "${C_BG_SEL}"; fi
+            printf '  %s %s%s%s%s%s    %s\n' "${mark}" "${cb}" "${id_tag}" "${C_BOLD}${GPU_NAME[$i]}${C_RST}" "${mine_tag}" "" "${b_disp}"
+            printf '      %s%s | %s | %s/%s MiB%s | %sC | %sW%s\n' \
+                "${C_DIM}" "${GPU_PCI[$i]}" "${GPU_PCIE[$i]:-PCIe}" "${GPU_USED[$i]}" "${GPU_TOT[$i]}" "${fix_part}${C_DIM}" "${GPU_TEMP[$i]}" "${GPU_PWR[$i]}" "${C_RST}"
+        done
+    fi
+
+    if has_pending_changes; then
+        printf '\n  %s! %s%s\n' "${C_YELLOW}" "$(T 'Настройки изменены — нажмите [I] Переустановить для применения.' 'Selection changed — press [I] Reinstall to apply.')" "${C_RST}"
+    fi
+
+    printf '\n  %sVulkan:%s %s\n' "${C_BOLD}" "${C_RST}" "$(T 'минимальный VRAM (~5-20 MiB), рекомендуется' 'minimal VRAM (~5-20 MiB), recommended')"
+    printf '  %sCUDA:%s   %s\n' "${C_BOLD}" "${C_RST}" "$(T 'повышенный VRAM (~200-300 MiB), если нет Vulkan' 'higher VRAM (~200-300 MiB), if Vulkan is missing')"
+
+    if [[ -n "${TEST_LAST_LINE}" ]]; then
+        if [[ ${TEST_LAST_OK} -eq 1 ]]; then
+            printf '\n  %s%s%s\n' "${C_GREEN}${C_BOLD}" "${TEST_LAST_LINE}" "${C_RST}"
+        else
+            printf '\n  %s%s%s\n' "${C_RED}${C_BOLD}" "${TEST_LAST_LINE}" "${C_RST}"
+        fi
+    fi
+
+    if [[ -n "${STATUS_MSG}" ]]; then
+        printf '\n  %s[i] %s%s\n' "${C_CYAN}" "${STATUS_MSG}" "${C_RST}"
+    fi
+
+    printf '\n%s────────────────────────────────────────────────────────────────────────────────%s\n' "${C_DIM}" "${C_RST}"
+    local inst_lbl p_lbl c_i="${C_DIM}" c_t="${C_DIM}"
+    if [[ ${SVC_INSTALLED} -eq 0 ]]; then
+        inst_lbl="$(T 'Установить' 'Install')"
+        c_i="${C_CYAN}${C_BOLD}"
+    elif has_pending_changes; then
+        inst_lbl="$(T 'Переустановить' 'Reinstall')"
+        c_i="${C_CYAN}${C_BOLD}"
+    else
+        inst_lbl="$(T 'Переустановить' 'Reinstall')"
+        c_t="${C_CYAN}${C_BOLD}"
+    fi
+    [[ ${SVC_PAUSED} -eq 1 ]] && p_lbl="$(T 'Возобновить' 'Resume')" || p_lbl="$(T 'Пауза' 'Pause')"
+
+    printf '  '
+    [[ ${GPU_COUNT} -gt 1 ]] && printf '%s[Space]%s %s  ' "${C_CYAN}" "${C_RST}" "$(T 'Выбрать' 'Select')"
+    printf '%s[B]%s Vulkan/CUDA  %s[I] %s%s  %s[P]%s %s  %s[T] %s%s  %s[U]%s %s  %s[G]%s %s  %s[R]%s  %s[Q]%s\n' \
+        "${C_CYAN}" "${C_RST}" \
+        "${c_i}" "${inst_lbl}" "${C_RST}" \
+        "${C_CYAN}" "${C_RST}" "${p_lbl}" \
+        "${c_t}" "$(T 'Тест 25с' 'Test 25s')" "${C_RST}" \
+        "${C_RED}" "${C_RST}" "$(T 'Удалить' 'Remove')" \
+        "${C_CYAN}" "${C_RST}" "$(T 'Лог' 'Log')" \
+        "${C_DIM}" "${C_RST}" "${C_DIM}" "${C_RST}"
+}
+
+cleanup() {
+    printf '\033[?25h%s\n' "${C_RST}"
+}
+trap cleanup EXIT INT TERM
+
+printf '\033[?25l'
+probe_gpus_initial
+poll_live_metrics
+
+while true; do
+    render_main
+    key=""
+    if IFS= read -rsn1 -t 2 key; then
+        if [[ "${key}" == $'\x1b' ]]; then
+            read -rsn2 -t 0.1 rest || true
+            case "${rest}" in
+                "[A") [[ ${GPU_COUNT} -gt 0 ]] && CURSOR=$(( (CURSOR - 1 + GPU_COUNT) % GPU_COUNT )) ;;
+                "[B") [[ ${GPU_COUNT} -gt 0 ]] && CURSOR=$(( (CURSOR + 1) % GPU_COUNT )) ;;
+            esac
+            continue
+        fi
+        case "${key}" in
+            " ")
+                if [[ ${GPU_COUNT} -gt 1 ]]; then
+                    GPU_SEL[$CURSOR]=$(( 1 - GPU_SEL[$CURSOR] ))
+                fi
+                ;;
+            b|B)
+                if [[ ${GPU_COUNT} -gt 0 ]]; then
+                    GPU_SEL[$CURSOR]=1
+                    if [[ "${GPU_BACKEND[$CURSOR]}" == "vulkan" ]]; then
+                        GPU_BACKEND[$CURSOR]="cuda"
+                    else
+                        GPU_BACKEND[$CURSOR]="vulkan"
+                        [[ "${VK_STATUS}" != "OK" ]] && show_vulkan_guide_screen
+                    fi
+                fi
+                ;;
+            i|I) do_install_service; poll_live_metrics ;;
+            p|P) do_pause_toggle; poll_live_metrics ;;
+            t|T) do_test_25s; poll_live_metrics ;;
+            u|U) do_uninstall_service; poll_live_metrics ;;
+            g|G) show_log_screen ;;
+            l|L) [[ "${LANG_MODE}" == "ru" ]] && LANG_MODE="en" || LANG_MODE="ru" ;;
+            r|R) check_vulkan; poll_live_metrics; STATUS_MSG="$(T 'Обновлено.' 'Refreshed.')" ;;
+            q|Q) break ;;
+        esac
+    else
+        poll_live_metrics
+    fi
+done

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Net;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
@@ -10,13 +11,12 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Shapes;
 using System.Windows.Threading;
+using Microsoft.Win32;
 
 namespace NvKeepAliveUI {
     public class GpuItem {
@@ -44,8 +44,62 @@ namespace NvKeepAliveUI {
         public string Backend = "vulkan"; // "vulkan" or "cuda"
     }
 
+    public class ThemePalette {
+        public bool IsDark;
+        public Brush BgWindow, BgCard, BorderCard, BgRow, BgRowSel, BorderRowSel;
+        public Brush BgSeg, BorderSeg, BgSubCard, BorderSubCard, BgLog, FgLog, BgModal;
+        public Brush Accent, AccentFg, FgPrimary, FgSecondary, FgMuted, DividerFg;
+        public Brush GreenBg, GreenBorder, GreenFg;
+        public Brush YellowBg, YellowBorder, YellowFg;
+        public Brush RedBg, RedBorder, RedFg;
+        public Brush BtnSecBg, BtnSecBorder, MiningBg, MiningFg, BlueBadgeBg, NeutralBadgeBg;
+        public Brush ToggleOffBg, ToggleOffBorder, ToggleOffThumb;
+
+        static SolidColorBrush Br(string hex) {
+            var b = (SolidColorBrush)new BrushConverter().ConvertFromString(hex);
+            b.Freeze();
+            return b;
+        }
+
+        public static readonly ThemePalette Dark = new ThemePalette {
+            IsDark = true,
+            BgWindow = Br("#202020"), BgCard = Br("#2B2B2B"), BorderCard = Br("#353535"),
+            BgRow = Br("#242424"), BgRowSel = Br("#25303A"), BorderRowSel = Br("#4A8CB0"),
+            BgSeg = Br("#1B1B1B"), BorderSeg = Br("#3C3C3C"),
+            BgSubCard = Br("#232323"), BorderSubCard = Br("#323232"),
+            BgLog = Br("#181818"), FgLog = Br("#CCCCCC"), BgModal = Br("#242424"),
+            Accent = Br("#60CDFF"), AccentFg = Br("#0B1620"),
+            FgPrimary = Br("#F3F3F3"), FgSecondary = Br("#A5A5A5"), FgMuted = Br("#9D9D9D"), DividerFg = Br("#555555"),
+            GreenBg = Br("#1D3A27"), GreenBorder = Br("#2C5C3B"), GreenFg = Br("#6CCB5F"),
+            YellowBg = Br("#3E321A"), YellowBorder = Br("#614E25"), YellowFg = Br("#FCE100"),
+            RedBg = Br("#362224"), RedBorder = Br("#5A3438"), RedFg = Br("#FF99A4"),
+            BtnSecBg = Br("#333333"), BtnSecBorder = Br("#444444"),
+            MiningBg = Br("#362C1E"), MiningFg = Br("#F5B951"),
+            BlueBadgeBg = Br("#1D3548"), NeutralBadgeBg = Br("#2F2F2F"),
+            ToggleOffBg = Br("#202020"), ToggleOffBorder = Br("#8C8C8C"), ToggleOffThumb = Br("#CCCCCC")
+        };
+
+        public static readonly ThemePalette Light = new ThemePalette {
+            IsDark = false,
+            BgWindow = Br("#F3F3F3"), BgCard = Br("#FFFFFF"), BorderCard = Br("#DFDFDF"),
+            BgRow = Br("#FAFAFA"), BgRowSel = Br("#EDF6FC"), BorderRowSel = Br("#0067C0"),
+            BgSeg = Br("#ECECEC"), BorderSeg = Br("#D0D0D0"),
+            BgSubCard = Br("#F7F7F7"), BorderSubCard = Br("#E2E2E2"),
+            BgLog = Br("#FAFAFA"), FgLog = Br("#1E1E1E"), BgModal = Br("#F3F3F3"),
+            Accent = Br("#0067C0"), AccentFg = Br("#FFFFFF"),
+            FgPrimary = Br("#1A1A1A"), FgSecondary = Br("#555555"), FgMuted = Br("#666666"), DividerFg = Br("#CCCCCC"),
+            GreenBg = Br("#DFF6DD"), GreenBorder = Br("#9FD89F"), GreenFg = Br("#107C10"),
+            YellowBg = Br("#FFF4CE"), YellowBorder = Br("#E6C24C"), YellowFg = Br("#7A5400"),
+            RedBg = Br("#FDE7E9"), RedBorder = Br("#E8A6AC"), RedFg = Br("#C42B1C"),
+            BtnSecBg = Br("#FFFFFF"), BtnSecBorder = Br("#CCCCCC"),
+            MiningBg = Br("#FFF3DC"), MiningFg = Br("#9A5B00"),
+            BlueBadgeBg = Br("#E5F1FB"), NeutralBadgeBg = Br("#EFEFEF"),
+            ToggleOffBg = Br("#FFFFFF"), ToggleOffBorder = Br("#767676"), ToggleOffThumb = Br("#555555")
+        };
+    }
+
     public class MainWindow : Window {
-        const string Version = "1.0.0";
+        const string Version = "1.1.0";
         const string TaskName = "NV-KeepAlive";
         const string Gen2TaskName = "40HX PCIe Gen2 Bring-up";
         const string MutexName = "Global\\NvKeepAliveMutex";
@@ -53,6 +107,8 @@ namespace NvKeepAliveUI {
         const string UnlockerRepoUrl = "https://github.com/Cyridd/cmpunlocker";
         const string LunarGUrl = "https://vulkan.lunarg.com/sdk/home#windows";
         const string NvidiaDrvUrl = "https://www.nvidia.com/drivers";
+        const string LatestReleaseApiUrl = "https://api.github.com/repos/D9eka/NV-KeepAlive/releases/latest";
+        const string ReleasesPageUrl = "https://github.com/D9eka/NV-KeepAlive/releases";
 
         static readonly string InstallDir = System.IO.Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NV-KeepAlive");
@@ -63,58 +119,34 @@ namespace NvKeepAliveUI {
         static readonly string Gen2OrigXmlPath = System.IO.Path.Combine(InstallDir, "gen2-orig.xml");
         static readonly string Gen2OrigCmdPath = System.IO.Path.Combine(InstallDir, "gen2-orig.txt");
 
-        // Win32 dark titlebar & env broadcast
         [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
         [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
         static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
 
-        static void ApplyDarkTitleBar(Window w) {
+        static void ApplyTitleBarTheme(Window w, bool isDark) {
             try {
                 IntPtr hwnd = new WindowInteropHelper(w).Handle;
                 if (hwnd == IntPtr.Zero) return;
-                int val = 1;
+                int val = isDark ? 1 : 0;
                 if (DwmSetWindowAttribute(hwnd, 20, ref val, sizeof(int)) != 0)
                     DwmSetWindowAttribute(hwnd, 19, ref val, sizeof(int));
             } catch {}
         }
 
-        // Brushes (Windows 11 Fluent Dark palette)
-        static SolidColorBrush Br(string hex) {
-            var b = (SolidColorBrush)new BrushConverter().ConvertFromString(hex);
-            b.Freeze();
-            return b;
+        static bool IsWindowsLightTheme() {
+            try {
+                object v = Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme", 0);
+                if (v is int) return ((int)v) != 0;
+            } catch {}
+            return false;
         }
-        static readonly Brush BgWindow = Br("#202020");
-        static readonly Brush BgCard = Br("#2B2B2B");
-        static readonly Brush BorderCard = Br("#353535");
-        static readonly Brush BgRow = Br("#242424");
-        static readonly Brush BgRowSel = Br("#25303A");
-        static readonly Brush BorderRowSel = Br("#4A8CB0");
-        static readonly Brush BgSeg = Br("#1B1B1B");
-        static readonly Brush BorderSeg = Br("#3C3C3C");
-        static readonly Brush BgLog = Br("#181818");
-        static readonly Brush Accent = Br("#60CDFF");
-        static readonly Brush AccentDarkFg = Br("#0B1620");
-        static readonly Brush FgPrimary = Br("#F3F3F3");
-        static readonly Brush FgSecondary = Br("#A5A5A5");
-        static readonly Brush FgMuted = Br("#9D9D9D");
-        static readonly Brush GreenBg = Br("#1D3A27");
-        static readonly Brush GreenBorder = Br("#2C5C3B");
-        static readonly Brush GreenFg = Br("#6CCB5F");
-        static readonly Brush YellowBg = Br("#3E321A");
-        static readonly Brush YellowBorder = Br("#614E25");
-        static readonly Brush YellowFg = Br("#FCE100");
-        static readonly Brush RedBg = Br("#362224");
-        static readonly Brush RedBorder = Br("#5A3438");
-        static readonly Brush RedFg = Br("#FF99A4");
-        static readonly Brush BtnSecBg = Br("#333333");
-        static readonly Brush BtnSecBorder = Br("#444444");
-        static readonly Brush MiningBg = Br("#362C1E");
-        static readonly Brush MiningFg = Br("#F5B951");
-        static readonly Brush BlueBadgeBg = Br("#1D3548");
 
-        // State
+        // Theme & language state
         bool _isRu;
+        string _themeMode = "auto"; // auto | dark | light
+        ThemePalette _pal = ThemePalette.Dark;
+
+        // App state
         string _daemonSourceExe;
         List<GpuItem> _gpus = new List<GpuItem>();
         Dictionary<int, string> _appliedTargets = new Dictionary<int, string>();
@@ -133,16 +165,13 @@ namespace NvKeepAliveUI {
         int _vramCachePid = -1;
         Dictionary<string, PerformanceCounter> _vramCounters = new Dictionary<string, PerformanceCounter>(StringComparer.OrdinalIgnoreCase);
 
-        // Vulkan probe
-        string _vkCheckStatus = "OK"; // OK | NO_LOADER | NO_NVIDIA_ICD
-
-        // Gen2 Unlock state
-        string _gen2State = "absent"; // absent | unsynced | synced
+        // Probes & updates
+        string _vkCheckStatus = "OK";
+        string _gen2State = "absent";
         string _gen2PcieSummary = "";
-
-        // COOPMAT2 state
         bool _coopmatApplied = false;
         bool _coopmatDraft = false;
+        string _availableUpdateTag = "";
 
         // Polling & Test
         DispatcherTimer _pollTimer;
@@ -151,7 +180,9 @@ namespace NvKeepAliveUI {
         string _lastLogText = "";
 
         // UI Controls
-        Button _btnRu, _btnEn;
+        Border _titleDot, _langBox, _cardMain, _vkLegBox, _cuLegBox, _cuBdg;
+        TextBlock _titleText, _dividerPipe, _lblCpu, _lblFixVram, _vkLegTitle, _cuLegTitle;
+        Button _btnRu, _btnEn, _btnTheme, _btnUpdate;
         TextBlock _lblStatusTitle, _lblTdr5m, _valTdr5m, _lblTdrStart, _valTdrStart, _valCpu, _valFixVram;
         Border _statusPill; Ellipse _statusDot; TextBlock _statusText;
         StackPanel _gpuListPanel;
@@ -171,26 +202,59 @@ namespace NvKeepAliveUI {
         StackPanel _testProgressWrap; TextBlock _testProgressLbl, _testProgressPct; ProgressBar _testProgressBar;
         TextBlock _lblLogTitle; Button _btnOpenFolder; TextBox _logBox;
 
-        public MainWindow() {
+        public MainWindow(string initialThemeMode) {
             _isRu = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName.Equals("ru", StringComparison.OrdinalIgnoreCase);
+            if (initialThemeMode == "dark" || initialThemeMode == "light" || initialThemeMode == "auto")
+                _themeMode = initialThemeMode;
+            _pal = ResolvePalette();
             _daemonSourceExe = FindDaemonExe();
 
             Title = "NV-KeepAlive v" + Version;
-            Width = 650;
-            MinWidth = 600;
+            Width = 660;
+            MinWidth = 610;
             SizeToContent = SizeToContent.Height;
             MaxHeight = 820;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
-            Background = BgWindow;
-            Foreground = FgPrimary;
             FontFamily = new FontFamily("Segoe UI Variable, Segoe UI");
             FontSize = 13;
 
-            SourceInitialized += (s, e) => ApplyDarkTitleBar(this);
+            SourceInitialized += (s, e) => ApplyTitleBarTheme(this, _pal.IsDark);
             Loaded += OnLoaded;
-            Closed += (s, e) => { if (_pollTimer != null) _pollTimer.Stop(); DisposeVramCounters(); };
+            Closed += (s, e) => {
+                if (_pollTimer != null) _pollTimer.Stop();
+                try { SystemEvents.UserPreferenceChanged -= OnSystemPreferenceChanged; } catch {}
+                DisposeVramCounters();
+            };
 
             BuildUi();
+            ApplyThemeToChrome();
+        }
+
+        ThemePalette ResolvePalette() {
+            if (_themeMode == "dark") return ThemePalette.Dark;
+            if (_themeMode == "light") return ThemePalette.Light;
+            return IsWindowsLightTheme() ? ThemePalette.Light : ThemePalette.Dark;
+        }
+
+        void OnSystemPreferenceChanged(object sender, UserPreferenceChangedEventArgs e) {
+            if (_themeMode != "auto") return;
+            Dispatcher.BeginInvoke((Action)(() => {
+                var next = ResolvePalette();
+                if (next.IsDark != _pal.IsDark) {
+                    _pal = next;
+                    ApplyThemeToChrome();
+                    RefreshTextsAndState();
+                }
+            }));
+        }
+
+        void CycleThemeMode() {
+            if (_themeMode == "auto") _themeMode = "dark";
+            else if (_themeMode == "dark") _themeMode = "light";
+            else _themeMode = "auto";
+            _pal = ResolvePalette();
+            ApplyThemeToChrome();
+            RefreshTextsAndState();
         }
 
         static string FindDaemonExe() {
@@ -229,7 +293,7 @@ namespace NvKeepAliveUI {
             tpl.VisualTree = bd;
 
             var trigHover = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
-            trigHover.Setters.Add(new Setter(UIElement.OpacityProperty, 0.90));
+            trigHover.Setters.Add(new Setter(UIElement.OpacityProperty, 0.88));
             tpl.Triggers.Add(trigHover);
 
             var trigDis = new Trigger { Property = UIElement.IsEnabledProperty, Value = false };
@@ -240,14 +304,14 @@ namespace NvKeepAliveUI {
             return st;
         }
 
-        Style PrimaryBtnStyle() { return MakeButtonStyle(Accent, Accent, AccentDarkFg, true); }
-        Style SecondaryBtnStyle() { return MakeButtonStyle(BtnSecBg, BtnSecBorder, FgPrimary, false); }
-        Style DangerBtnStyle() { return MakeButtonStyle(RedBg, RedBorder, RedFg, false); }
+        Style PrimaryBtnStyle() { return MakeButtonStyle(_pal.Accent, _pal.Accent, _pal.AccentFg, true); }
+        Style SecondaryBtnStyle() { return MakeButtonStyle(_pal.BtnSecBg, _pal.BtnSecBorder, _pal.FgPrimary, false); }
+        Style DangerBtnStyle() { return MakeButtonStyle(_pal.RedBg, _pal.RedBorder, _pal.RedFg, false); }
 
         Border MakeCard(UIElement child, Thickness pad) {
             return new Border {
-                Background = BgCard,
-                BorderBrush = BorderCard,
+                Background = _pal.BgCard,
+                BorderBrush = _pal.BorderCard,
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(8),
                 Padding = pad,
@@ -260,12 +324,22 @@ namespace NvKeepAliveUI {
             var scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
             var root = new StackPanel { Margin = new Thickness(16, 12, 16, 14) };
 
-            // Top bar (Title + RU/EN toggle)
+            // Top bar (Title + optional Update badge + Theme toggle + RU/EN toggle)
             var topBar = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
-            var langBox = new Border {
-                Background = BgCard, BorderBrush = BorderSeg, BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(5), Padding = new Thickness(2)
+
+            var rightControls = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            _btnUpdate = new Button {
+                Padding = new Thickness(8, 2, 8, 2), FontSize = 11, Margin = new Thickness(0, 0, 8, 0),
+                Visibility = Visibility.Collapsed
             };
+            _btnUpdate.Click += (s, e) => OpenUrl(ReleasesPageUrl);
+            rightControls.Children.Add(_btnUpdate);
+
+            _btnTheme = new Button { Padding = new Thickness(8, 2, 8, 2), FontSize = 11, Margin = new Thickness(0, 0, 8, 0) };
+            _btnTheme.Click += (s, e) => CycleThemeMode();
+            rightControls.Children.Add(_btnTheme);
+
+            _langBox = new Border { BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(5), Padding = new Thickness(2) };
             var langSp = new StackPanel { Orientation = Orientation.Horizontal };
             _btnRu = new Button { Content = "RU", Padding = new Thickness(8, 2, 8, 2), FontSize = 11 };
             _btnEn = new Button { Content = "EN", Padding = new Thickness(8, 2, 8, 2), FontSize = 11, Margin = new Thickness(2, 0, 0, 0) };
@@ -273,17 +347,21 @@ namespace NvKeepAliveUI {
             _btnEn.Click += (s, e) => { _isRu = false; RefreshTextsAndState(); };
             langSp.Children.Add(_btnRu);
             langSp.Children.Add(_btnEn);
-            langBox.Child = langSp;
-            DockPanel.SetDock(langBox, Dock.Right);
-            topBar.Children.Add(langBox);
+            _langBox.Child = langSp;
+            rightControls.Children.Add(_langBox);
+
+            DockPanel.SetDock(rightControls, Dock.Right);
+            topBar.Children.Add(rightControls);
 
             var titleRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            titleRow.Children.Add(new Border { Width = 10, Height = 10, CornerRadius = new CornerRadius(2), Background = Accent, Margin = new Thickness(0, 0, 8, 0) });
-            titleRow.Children.Add(new TextBlock { Text = "NV-KeepAlive v" + Version, FontWeight = FontWeights.SemiBold, FontSize = 14, Foreground = FgPrimary });
+            _titleDot = new Border { Width = 10, Height = 10, CornerRadius = new CornerRadius(2), Margin = new Thickness(0, 0, 8, 0) };
+            _titleText = new TextBlock { Text = "NV-KeepAlive v" + Version, FontWeight = FontWeights.SemiBold, FontSize = 14 };
+            titleRow.Children.Add(_titleDot);
+            titleRow.Children.Add(_titleText);
             topBar.Children.Add(titleRow);
             root.Children.Add(topBar);
 
-            // ===== Block 1: GPUs, Backends, Live CPU & Short-Window TDR =====
+            // ===== Block 1: GPUs, Backends, Live CPU & Daemon VRAM & Short-Window TDR =====
             var b1 = new StackPanel();
             var b1Head = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
 
@@ -298,21 +376,21 @@ namespace NvKeepAliveUI {
             b1Head.Children.Add(_statusPill);
 
             var metricsSp = new WrapPanel { VerticalAlignment = VerticalAlignment.Center };
-            _lblStatusTitle = new TextBlock { FontSize = 11, FontWeight = FontWeights.SemiBold, Foreground = FgMuted, Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
-            metricsSp.Children.Add(_lblStatusTitle);
-            metricsSp.Children.Add(new TextBlock { Text = "|", Foreground = Br("#555555"), Margin = new Thickness(0, 0, 8, 0), FontSize = 11 });
-            _lblTdr5m = new TextBlock { FontSize = 11.5, Foreground = FgMuted, Margin = new Thickness(0, 0, 3, 0) };
-            _valTdr5m = new TextBlock { FontSize = 11.5, FontFamily = new FontFamily("Consolas"), FontWeight = FontWeights.Bold, Foreground = GreenFg, Text = "0", Margin = new Thickness(0, 0, 8, 0) };
-            _lblTdrStart = new TextBlock { FontSize = 11.5, Foreground = FgMuted, Margin = new Thickness(0, 0, 3, 0) };
-            _valTdrStart = new TextBlock { FontSize = 11.5, FontFamily = new FontFamily("Consolas"), FontWeight = FontWeights.Bold, Foreground = GreenFg, Text = "0", Margin = new Thickness(0, 0, 8, 0) };
-            var lblCpu = new TextBlock { FontSize = 11.5, Foreground = FgMuted, Text = "CPU: " };
-            _valCpu = new TextBlock { FontSize = 11.5, FontFamily = new FontFamily("Consolas"), FontWeight = FontWeights.Bold, Foreground = FgPrimary, Text = "-", Margin = new Thickness(0, 0, 8, 0) };
-            var lblFixVram = new TextBlock { FontSize = 11.5, Foreground = FgMuted, Text = "VRAM: " };
-            _valFixVram = new TextBlock { FontSize = 11.5, FontFamily = new FontFamily("Consolas"), FontWeight = FontWeights.Bold, Foreground = Accent, Text = "-" };
+            _lblStatusTitle = new TextBlock { FontSize = 11, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
+            _dividerPipe = new TextBlock { Text = "|", Margin = new Thickness(0, 0, 8, 0), FontSize = 11 };
+            _lblTdr5m = new TextBlock { FontSize = 11.5, Margin = new Thickness(0, 0, 3, 0) };
+            _valTdr5m = new TextBlock { FontSize = 11.5, FontFamily = new FontFamily("Consolas"), FontWeight = FontWeights.Bold, Text = "0", Margin = new Thickness(0, 0, 8, 0) };
+            _lblTdrStart = new TextBlock { FontSize = 11.5, Margin = new Thickness(0, 0, 3, 0) };
+            _valTdrStart = new TextBlock { FontSize = 11.5, FontFamily = new FontFamily("Consolas"), FontWeight = FontWeights.Bold, Text = "0", Margin = new Thickness(0, 0, 8, 0) };
+            _lblCpu = new TextBlock { FontSize = 11.5, Text = "CPU: " };
+            _valCpu = new TextBlock { FontSize = 11.5, FontFamily = new FontFamily("Consolas"), FontWeight = FontWeights.Bold, Text = "-", Margin = new Thickness(0, 0, 8, 0) };
+            _lblFixVram = new TextBlock { FontSize = 11.5, Text = "VRAM: " };
+            _valFixVram = new TextBlock { FontSize = 11.5, FontFamily = new FontFamily("Consolas"), FontWeight = FontWeights.Bold, Text = "-" };
+            metricsSp.Children.Add(_lblStatusTitle); metricsSp.Children.Add(_dividerPipe);
             metricsSp.Children.Add(_lblTdr5m); metricsSp.Children.Add(_valTdr5m);
             metricsSp.Children.Add(_lblTdrStart); metricsSp.Children.Add(_valTdrStart);
-            metricsSp.Children.Add(lblCpu); metricsSp.Children.Add(_valCpu);
-            metricsSp.Children.Add(lblFixVram); metricsSp.Children.Add(_valFixVram);
+            metricsSp.Children.Add(_lblCpu); metricsSp.Children.Add(_valCpu);
+            metricsSp.Children.Add(_lblFixVram); metricsSp.Children.Add(_valFixVram);
             b1Head.Children.Add(metricsSp);
             b1.Children.Add(b1Head);
 
@@ -320,53 +398,53 @@ namespace NvKeepAliveUI {
             b1.Children.Add(_gpuListPanel);
 
             _pendingHintBox = new Border {
-                Background = YellowBg, BorderBrush = YellowBorder, BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(5), Padding = new Thickness(8, 5, 8, 5), Margin = new Thickness(0, 6, 0, 0),
-                Visibility = Visibility.Collapsed
+                BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(5),
+                Padding = new Thickness(8, 5, 8, 5), Margin = new Thickness(0, 6, 0, 0), Visibility = Visibility.Collapsed
             };
-            _pendingHintText = new TextBlock { FontSize = 11.5, Foreground = YellowFg, TextWrapping = TextWrapping.Wrap };
+            _pendingHintText = new TextBlock { FontSize = 11.5, TextWrapping = TextWrapping.Wrap };
             _pendingHintBox.Child = _pendingHintText;
             b1.Children.Add(_pendingHintBox);
 
-            // Compact backend legend (no hardcoded CPU!)
+            // Compact backend legend
             var legGrid = new Grid { Margin = new Thickness(0, 8, 0, 0) };
             legGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             legGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8) });
             legGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-            var vkLeg = new Border { Background = Br("#232323"), BorderBrush = Br("#323232"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(5), Padding = new Thickness(8, 5, 8, 5) };
+            _vkLegBox = new Border { BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(5), Padding = new Thickness(8, 5, 8, 5) };
             var vkLegSp = new StackPanel();
             var vkTop = new StackPanel { Orientation = Orientation.Horizontal };
-            vkTop.Children.Add(new TextBlock { Text = "Vulkan", FontWeight = FontWeights.SemiBold, FontSize = 11.5, Foreground = FgPrimary });
+            _vkLegTitle = new TextBlock { Text = "Vulkan", FontWeight = FontWeights.SemiBold, FontSize = 11.5 };
             _vkBadge = new Border { CornerRadius = new CornerRadius(3), Padding = new Thickness(5, 0, 5, 1), Margin = new Thickness(6, 0, 0, 0), Cursor = Cursors.Hand };
             _vkBadgeText = new TextBlock { FontSize = 10.5 };
             _vkBadge.Child = _vkBadgeText;
             _vkBadge.MouseLeftButtonUp += (s, e) => { if (_vkCheckStatus != "OK") ShowVulkanGuideModal(); };
-            vkTop.Children.Add(_vkBadge);
-            _legendVk = new TextBlock { FontSize = 11, Foreground = FgSecondary, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0) };
+            vkTop.Children.Add(_vkLegTitle); vkTop.Children.Add(_vkBadge);
+            _legendVk = new TextBlock { FontSize = 11, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0) };
             vkLegSp.Children.Add(vkTop); vkLegSp.Children.Add(_legendVk);
-            vkLeg.Child = vkLegSp;
-            Grid.SetColumn(vkLeg, 0);
-            legGrid.Children.Add(vkLeg);
+            _vkLegBox.Child = vkLegSp;
+            Grid.SetColumn(_vkLegBox, 0);
+            legGrid.Children.Add(_vkLegBox);
 
-            var cuLeg = new Border { Background = Br("#232323"), BorderBrush = Br("#323232"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(5), Padding = new Thickness(8, 5, 8, 5) };
+            _cuLegBox = new Border { BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(5), Padding = new Thickness(8, 5, 8, 5) };
             var cuLegSp = new StackPanel();
             var cuTop = new StackPanel { Orientation = Orientation.Horizontal };
-            cuTop.Children.Add(new TextBlock { Text = "CUDA", FontWeight = FontWeights.SemiBold, FontSize = 11.5, Foreground = FgPrimary });
-            var cuBdg = new Border { Background = GreenBg, CornerRadius = new CornerRadius(3), Padding = new Thickness(5, 0, 5, 1), Margin = new Thickness(6, 0, 0, 0) };
-            _cudaBadgeText = new TextBlock { FontSize = 10.5, Foreground = GreenFg };
-            cuBdg.Child = _cudaBadgeText;
-            cuTop.Children.Add(cuBdg);
-            _legendCuda = new TextBlock { FontSize = 11, Foreground = FgSecondary, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0) };
+            _cuLegTitle = new TextBlock { Text = "CUDA", FontWeight = FontWeights.SemiBold, FontSize = 11.5 };
+            _cuBdg = new Border { CornerRadius = new CornerRadius(3), Padding = new Thickness(5, 0, 5, 1), Margin = new Thickness(6, 0, 0, 0) };
+            _cudaBadgeText = new TextBlock { FontSize = 10.5 };
+            _cuBdg.Child = _cudaBadgeText;
+            cuTop.Children.Add(_cuLegTitle); cuTop.Children.Add(_cuBdg);
+            _legendCuda = new TextBlock { FontSize = 11, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0) };
             cuLegSp.Children.Add(cuTop); cuLegSp.Children.Add(_legendCuda);
-            cuLeg.Child = cuLegSp;
-            Grid.SetColumn(cuLeg, 2);
-            legGrid.Children.Add(cuLeg);
+            _cuLegBox.Child = cuLegSp;
+            Grid.SetColumn(_cuLegBox, 2);
+            legGrid.Children.Add(_cuLegBox);
 
             b1.Children.Add(legGrid);
-            root.Children.Add(MakeCard(b1, new Thickness(12, 10, 12, 10)));
+            _cardMain = MakeCard(b1, new Thickness(12, 10, 12, 10));
+            root.Children.Add(_cardMain);
 
-            // ===== Block 2: PCIe Gen2 Unlock Sync + '?' (shown ONLY when CMP 40HX is selected) =====
+            // ===== Block 2: PCIe Gen2 Unlock Sync + '?' =====
             var g2Dock = new DockPanel();
             _btnGen2Sync = new Button { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 0, 0) };
             _btnGen2Sync.Click += OnGen2SyncClick;
@@ -375,23 +453,23 @@ namespace NvKeepAliveUI {
 
             var g2Left = new StackPanel();
             var g2Top = new WrapPanel { VerticalAlignment = VerticalAlignment.Center };
-            _lblGen2Title = new TextBlock { FontWeight = FontWeights.Medium, Foreground = FgPrimary, VerticalAlignment = VerticalAlignment.Center };
+            _lblGen2Title = new TextBlock { FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center };
             _btnGen2Help = new Button {
                 Content = "?", Width = 19, Height = 19, Padding = new Thickness(0), Margin = new Thickness(7, 0, 7, 0),
-                FontSize = 11, FontWeight = FontWeights.Bold, Style = MakeButtonStyle(BtnSecBg, Br("#555555"), FgPrimary, true)
+                FontSize = 11, FontWeight = FontWeights.Bold
             };
             _btnGen2Help.Click += (s, e) => ShowGen2InfoModal();
             _gen2Badge = new Border { CornerRadius = new CornerRadius(9), BorderThickness = new Thickness(1), Padding = new Thickness(7, 1, 7, 1), VerticalAlignment = VerticalAlignment.Center };
             _gen2BadgeText = new TextBlock { FontSize = 11, FontWeight = FontWeights.Medium };
             _gen2Badge.Child = _gen2BadgeText;
             g2Top.Children.Add(_lblGen2Title); g2Top.Children.Add(_btnGen2Help); g2Top.Children.Add(_gen2Badge);
-            _descGen2 = new TextBlock { FontSize = 11.5, Foreground = FgSecondary, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 3, 0, 0) };
+            _descGen2 = new TextBlock { FontSize = 11.5, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 3, 0, 0) };
             g2Left.Children.Add(g2Top); g2Left.Children.Add(_descGen2);
             g2Dock.Children.Add(g2Left);
             _gen2Card = MakeCard(g2Dock, new Thickness(12, 10, 12, 10));
             root.Children.Add(_gen2Card);
 
-            // ===== Block 3: GGML_VK_DISABLE_COOPMAT2 Toggle + Apply (shown ONLY when a CMP GPU is selected) =====
+            // ===== Block 3: GGML_VK_DISABLE_COOPMAT2 Toggle + Apply =====
             var cmDock = new DockPanel();
             var cmRight = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 0, 0) };
             _toggleTrack = new Border {
@@ -401,8 +479,8 @@ namespace NvKeepAliveUI {
             _toggleThumb = new Ellipse { Width = 12, Height = 12, Margin = new Thickness(3, 0, 3, 0), VerticalAlignment = VerticalAlignment.Center };
             _toggleTrack.Child = _toggleThumb;
             _toggleTrack.MouseLeftButtonUp += (s, e) => { _coopmatDraft = !_coopmatDraft; RenderCoopmat(); };
-            _coopmatSwitchLbl = new TextBlock { FontSize = 12, Foreground = FgPrimary, Width = 34, Margin = new Thickness(6, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
-            _btnApplyCoopmat = new Button { Style = PrimaryBtnStyle(), VerticalAlignment = VerticalAlignment.Center };
+            _coopmatSwitchLbl = new TextBlock { FontSize = 12, Width = 34, Margin = new Thickness(6, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
+            _btnApplyCoopmat = new Button { VerticalAlignment = VerticalAlignment.Center };
             _btnApplyCoopmat.Click += OnApplyCoopmatClick;
             cmRight.Children.Add(_toggleTrack); cmRight.Children.Add(_coopmatSwitchLbl); cmRight.Children.Add(_btnApplyCoopmat);
             DockPanel.SetDock(cmRight, Dock.Right);
@@ -410,12 +488,12 @@ namespace NvKeepAliveUI {
 
             var cmLeft = new StackPanel();
             var cmTop = new WrapPanel { VerticalAlignment = VerticalAlignment.Center };
-            _lblCoopmat = new TextBlock { Text = "GGML_VK_DISABLE_COOPMAT2", FontWeight = FontWeights.Medium, Foreground = FgPrimary, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
+            _lblCoopmat = new TextBlock { Text = "GGML_VK_DISABLE_COOPMAT2", FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
             _coopmatAppliedBadge = new Border { CornerRadius = new CornerRadius(4), BorderThickness = new Thickness(1), Padding = new Thickness(6, 1, 6, 1), VerticalAlignment = VerticalAlignment.Center };
             _coopmatAppliedText = new TextBlock { FontSize = 10.5, FontFamily = new FontFamily("Consolas") };
             _coopmatAppliedBadge.Child = _coopmatAppliedText;
             cmTop.Children.Add(_lblCoopmat); cmTop.Children.Add(_coopmatAppliedBadge);
-            _descCoopmat = new TextBlock { FontSize = 11.5, Foreground = FgSecondary, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 3, 0, 0) };
+            _descCoopmat = new TextBlock { FontSize = 11.5, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 3, 0, 0) };
             cmLeft.Children.Add(cmTop); cmLeft.Children.Add(_descCoopmat);
             cmDock.Children.Add(cmLeft);
             _coopmatCard = MakeCard(cmDock, new Thickness(12, 10, 12, 10));
@@ -428,9 +506,9 @@ namespace NvKeepAliveUI {
                 actGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             }
             _btnInstall = new Button { Padding = new Thickness(8, 8, 8, 8) };
-            _btnPause   = new Button { Padding = new Thickness(8, 8, 8, 8), Style = SecondaryBtnStyle() };
+            _btnPause   = new Button { Padding = new Thickness(8, 8, 8, 8) };
             _btnTest    = new Button { Padding = new Thickness(8, 8, 8, 8) };
-            _btnRemove  = new Button { Padding = new Thickness(8, 8, 8, 8), Style = DangerBtnStyle() };
+            _btnRemove  = new Button { Padding = new Thickness(8, 8, 8, 8) };
 
             _btnInstall.Click += OnInstallClick;
             _btnPause.Click   += OnPauseClick;
@@ -446,38 +524,32 @@ namespace NvKeepAliveUI {
             // Test Progress Bar
             _testProgressWrap = new StackPanel { Margin = new Thickness(0, 0, 0, 10), Visibility = Visibility.Collapsed };
             var tpTop = new DockPanel { Margin = new Thickness(0, 0, 0, 3) };
-            _testProgressPct = new TextBlock { FontSize = 11.5, FontFamily = new FontFamily("Consolas"), Foreground = FgSecondary };
+            _testProgressPct = new TextBlock { FontSize = 11.5, FontFamily = new FontFamily("Consolas") };
             DockPanel.SetDock(_testProgressPct, Dock.Right);
             tpTop.Children.Add(_testProgressPct);
-            _testProgressLbl = new TextBlock { FontSize = 11.5, Foreground = FgSecondary };
+            _testProgressLbl = new TextBlock { FontSize = 11.5 };
             tpTop.Children.Add(_testProgressLbl);
-            _testProgressBar = new ProgressBar { Height = 6, Minimum = 0, Maximum = 100, Background = BtnSecBg, Foreground = Accent, BorderThickness = new Thickness(0) };
+            _testProgressBar = new ProgressBar { Height = 6, Minimum = 0, Maximum = 100, BorderThickness = new Thickness(0) };
             _testProgressWrap.Children.Add(tpTop);
             _testProgressWrap.Children.Add(_testProgressBar);
             root.Children.Add(_testProgressWrap);
 
             // ===== Block 5: Event Log =====
             var logHead = new DockPanel { Margin = new Thickness(0, 2, 0, 4) };
-            _btnOpenFolder = new Button {
-                Style = MakeButtonStyle(Brushes.Transparent, Brushes.Transparent, Accent, false),
-                Padding = new Thickness(2, 0, 2, 0), FontSize = 11.5
-            };
+            _btnOpenFolder = new Button { Padding = new Thickness(2, 0, 2, 0), FontSize = 11.5 };
             _btnOpenFolder.Click += (s, e) => {
-                try {
-                    Directory.CreateDirectory(InstallDir);
-                    Process.Start("explorer.exe", InstallDir);
-                } catch {}
+                try { Directory.CreateDirectory(InstallDir); Process.Start("explorer.exe", InstallDir); } catch {}
             };
             DockPanel.SetDock(_btnOpenFolder, Dock.Right);
             logHead.Children.Add(_btnOpenFolder);
-            _lblLogTitle = new TextBlock { FontSize = 11.5, Foreground = FgMuted, FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center };
+            _lblLogTitle = new TextBlock { FontSize = 11.5, FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center };
             logHead.Children.Add(_lblLogTitle);
             root.Children.Add(logHead);
 
             _logBox = new TextBox {
                 IsReadOnly = true, Height = 105, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap,
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-                Background = BgLog, Foreground = Br("#CCCCCC"), BorderBrush = Br("#323232"), BorderThickness = new Thickness(1),
+                BorderThickness = new Thickness(1),
                 FontFamily = new FontFamily("Cascadia Mono, Consolas"), FontSize = 11, Padding = new Thickness(8, 6, 8, 6)
             };
             root.Children.Add(_logBox);
@@ -486,8 +558,63 @@ namespace NvKeepAliveUI {
             Content = scroll;
         }
 
-        // ===================== Startup & Live Polling =====================
+        void ApplyThemeToChrome() {
+            ApplyTitleBarTheme(this, _pal.IsDark);
+            Background = _pal.BgWindow;
+            Foreground = _pal.FgPrimary;
+
+            _titleDot.Background = _pal.Accent;
+            _titleText.Foreground = _pal.FgPrimary;
+            _langBox.Background = _pal.BgCard;
+            _langBox.BorderBrush = _pal.BorderSeg;
+
+            _cardMain.Background = _pal.BgCard; _cardMain.BorderBrush = _pal.BorderCard;
+            _gen2Card.Background = _pal.BgCard; _gen2Card.BorderBrush = _pal.BorderCard;
+            _coopmatCard.Background = _pal.BgCard; _coopmatCard.BorderBrush = _pal.BorderCard;
+
+            _lblStatusTitle.Foreground = _pal.FgMuted;
+            _dividerPipe.Foreground = _pal.DividerFg;
+            _lblTdr5m.Foreground = _pal.FgMuted;
+            _lblTdrStart.Foreground = _pal.FgMuted;
+            _lblCpu.Foreground = _pal.FgMuted;
+            _valCpu.Foreground = _pal.FgPrimary;
+            _lblFixVram.Foreground = _pal.FgMuted;
+            _valFixVram.Foreground = _pal.Accent;
+
+            _pendingHintBox.Background = _pal.YellowBg; _pendingHintBox.BorderBrush = _pal.YellowBorder;
+            _pendingHintText.Foreground = _pal.YellowFg;
+
+            _vkLegBox.Background = _pal.BgSubCard; _vkLegBox.BorderBrush = _pal.BorderSubCard;
+            _vkLegTitle.Foreground = _pal.FgPrimary; _legendVk.Foreground = _pal.FgSecondary;
+            _cuLegBox.Background = _pal.BgSubCard; _cuLegBox.BorderBrush = _pal.BorderSubCard;
+            _cuLegTitle.Foreground = _pal.FgPrimary; _legendCuda.Foreground = _pal.FgSecondary;
+            _cuBdg.Background = _pal.GreenBg; _cudaBadgeText.Foreground = _pal.GreenFg;
+
+            _lblGen2Title.Foreground = _pal.FgPrimary; _descGen2.Foreground = _pal.FgSecondary;
+            _btnGen2Help.Style = MakeButtonStyle(_pal.BtnSecBg, _pal.BtnSecBorder, _pal.FgPrimary, true);
+            _lblCoopmat.Foreground = _pal.FgPrimary; _descCoopmat.Foreground = _pal.FgSecondary;
+            _coopmatSwitchLbl.Foreground = _pal.FgPrimary;
+            _btnApplyCoopmat.Style = PrimaryBtnStyle();
+
+            _btnPause.Style = SecondaryBtnStyle();
+            _btnRemove.Style = DangerBtnStyle();
+            _btnTheme.Style = SecondaryBtnStyle();
+            _btnUpdate.Style = MakeButtonStyle(_pal.BlueBadgeBg, _pal.BorderRowSel, _pal.Accent, true);
+
+            _testProgressPct.Foreground = _pal.FgSecondary;
+            _testProgressBar.Background = _pal.BtnSecBg;
+            _testProgressBar.Foreground = _pal.Accent;
+
+            _lblLogTitle.Foreground = _pal.FgMuted;
+            _btnOpenFolder.Style = MakeButtonStyle(Brushes.Transparent, Brushes.Transparent, _pal.Accent, false);
+            _logBox.Background = _pal.BgLog;
+            _logBox.Foreground = _pal.FgLog;
+            _logBox.BorderBrush = _pal.BorderSubCard;
+        }
+
+        // ===================== Startup, Update Check & Live Polling =====================
         void OnLoaded(object sender, RoutedEventArgs e) {
+            try { SystemEvents.UserPreferenceChanged += OnSystemPreferenceChanged; } catch {}
             LoadCoopmatState();
             ProbeInitialHardwareAndService();
             RefreshTextsAndState();
@@ -496,6 +623,36 @@ namespace NvKeepAliveUI {
             _pollTimer.Tick += (s, ev) => TriggerBackgroundPoll();
             _pollTimer.Start();
             TriggerBackgroundPoll();
+            CheckForUpdatesAsync();
+        }
+
+        void CheckForUpdatesAsync() {
+            ThreadPool.QueueUserWorkItem(_ => {
+                try {
+                    ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072; // TLS 1.2
+                    var req = (HttpWebRequest)WebRequest.Create(LatestReleaseApiUrl);
+                    req.UserAgent = "NV-KeepAlive/" + Version;
+                    req.Timeout = 3000;
+                    req.ReadWriteTimeout = 3000;
+                    using (var resp = (HttpWebResponse)req.GetResponse())
+                    using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8)) {
+                        string body = sr.ReadToEnd();
+                        var m = Regex.Match(body, "\"tag_name\"\\s*:\\s*\"v?([0-9]+\\.[0-9]+\\.[0-9]+)\"");
+                        if (m.Success) {
+                            Version latest, current;
+                            if (System.Version.TryParse(m.Groups[1].Value, out latest) &&
+                                System.Version.TryParse(Version, out current) &&
+                                latest > current) {
+                                string tag = "v" + m.Groups[1].Value;
+                                Dispatcher.BeginInvoke((Action)(() => {
+                                    _availableUpdateTag = tag;
+                                    RefreshTextsAndState();
+                                }));
+                            }
+                        }
+                    }
+                } catch {}
+            });
         }
 
         void LoadCoopmatState() {
@@ -508,7 +665,6 @@ namespace NvKeepAliveUI {
             CheckVulkanNow();
             ReadInstalledServiceConfig();
 
-            // Enumerate NVIDIA GPUs via NvKeepAlive.exe --list-tsv
             _gpus.Clear();
             string outStr;
             int rc = RunProcessCapture(_daemonSourceExe, "--list-tsv", 6000, out outStr);
@@ -536,7 +692,6 @@ namespace NvKeepAliveUI {
                 }
             }
 
-            // Initialize draft selections from currently installed service, or sensible defaults
             if (_appliedTargets.Count > 0) {
                 foreach (var g in _gpus) {
                     if (_appliedTargets.ContainsKey(g.Index)) {
@@ -573,10 +728,9 @@ namespace NvKeepAliveUI {
             if (rc != 0 || string.IsNullOrEmpty(xmlOut)) return;
             _serviceInstalled = true;
 
-            // Parse <Arguments>...</Arguments>
             var mArg = Regex.Match(xmlOut, @"<Arguments>(.*?)</Arguments>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
             if (!mArg.Success) return;
-            string args = System.Net.WebUtility.HtmlDecode(mArg.Groups[1].Value);
+            string args = WebUtility.HtmlDecode(mArg.Groups[1].Value);
 
             var mTargets = Regex.Match(args, @"--targets\s+([^\s""]+)", RegexOptions.IgnoreCase);
             if (mTargets.Success) {
@@ -590,7 +744,6 @@ namespace NvKeepAliveUI {
                 return;
             }
 
-            // Fallback: --backend + --device
             var mBack = Regex.Match(args, @"--backend\s+([^\s""]+)", RegexOptions.IgnoreCase);
             var mDev  = Regex.Match(args, @"--device\s+([^\s""]+)", RegexOptions.IgnoreCase);
             string b = mBack.Success ? mBack.Groups[1].Value.ToLowerInvariant() : "vulkan";
@@ -612,14 +765,8 @@ namespace NvKeepAliveUI {
         void CheckGen2Status() {
             string xmlOut;
             int rc = RunProcessCapture("schtasks.exe", "/Query /TN \"" + Gen2TaskName + "\" /XML", 4000, out xmlOut);
-            if (rc != 0 || string.IsNullOrEmpty(xmlOut)) {
-                _gen2State = "absent";
-                return;
-            }
-            if (xmlOut.IndexOf("gen2-sync-wrapper.cmd", StringComparison.OrdinalIgnoreCase) >= 0)
-                _gen2State = "synced";
-            else
-                _gen2State = "unsynced";
+            if (rc != 0 || string.IsNullOrEmpty(xmlOut)) { _gen2State = "absent"; return; }
+            _gen2State = (xmlOut.IndexOf("gen2-sync-wrapper.cmd", StringComparison.OrdinalIgnoreCase) >= 0) ? "synced" : "unsynced";
         }
 
         void DisposeVramCounters() {
@@ -630,14 +777,8 @@ namespace NvKeepAliveUI {
 
         Dictionary<string, double> ReadDaemonVramByLuid(int pid, List<string> luids) {
             var res = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
-            if (pid <= 0 || luids == null || luids.Count == 0) {
-                DisposeVramCounters();
-                return res;
-            }
-            if (_vramCachePid != pid) {
-                DisposeVramCounters();
-                _vramCachePid = pid;
-            }
+            if (pid <= 0 || luids == null || luids.Count == 0) { DisposeVramCounters(); return res; }
+            if (_vramCachePid != pid) { DisposeVramCounters(); _vramCachePid = pid; }
             foreach (string luid in luids) {
                 if (string.IsNullOrEmpty(luid)) continue;
                 try {
@@ -668,7 +809,6 @@ namespace NvKeepAliveUI {
             foreach (var g in _gpus) if (!string.IsNullOrEmpty(g.Luid)) gpuLuids.Add(g.Luid);
             ThreadPool.QueueUserWorkItem(_ => {
                 try {
-                    // 1. Service running / paused / live CPU% / live Daemon VRAM
                     bool running = false;
                     int daemonPid = -1;
                     string cpuTxt = "-";
@@ -726,7 +866,6 @@ namespace NvKeepAliveUI {
                         }
                     }
 
-                    // 2. Live nvidia-smi telemetry (PCI Bus ID, VRAM, Temp, Power, PCIe Max Gen & Width)
                     string smiOut;
                     var smiMap = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
                     var smiList = new List<string[]>();
@@ -744,12 +883,10 @@ namespace NvKeepAliveUI {
                         }
                     }
 
-                    // 3. Short-window TDR counts (last 5 min + since service/UI start)
                     DateTime startRef = procStart ?? _sessionStart;
                     int tdr5 = CountNvlddmkmSince(DateTime.Now.AddMinutes(-5));
                     int tdrS = CountNvlddmkmSince(startRef);
 
-                    // 4. Tail keepalive.log
                     string logTxt = "";
                     if (File.Exists(LogFile)) {
                         try {
@@ -777,6 +914,7 @@ namespace NvKeepAliveUI {
                                 g.DaemonVramMiB = 0.0;
                             else
                                 g.DaemonVramMiB = null;
+
                             string[] cols = null;
                             if (!string.IsNullOrEmpty(g.PciBusId) && smiMap.ContainsKey(g.PciBusId)) cols = smiMap[g.PciBusId];
                             else if (i < smiList.Count) cols = smiList[i];
@@ -819,9 +957,7 @@ namespace NvKeepAliveUI {
                     }
                 }
                 return count;
-            } catch {
-                return 0;
-            }
+            } catch { return 0; }
         }
 
         // ===================== State Rendering =====================
@@ -851,21 +987,30 @@ namespace NvKeepAliveUI {
         }
 
         void RefreshTextsAndState() {
-            // Language toggle style
-            _btnRu.Style = _isRu ? PrimaryBtnStyle() : MakeButtonStyle(Brushes.Transparent, Brushes.Transparent, FgSecondary, false);
-            _btnEn.Style = !_isRu ? PrimaryBtnStyle() : MakeButtonStyle(Brushes.Transparent, Brushes.Transparent, FgSecondary, false);
+            _btnRu.Style = _isRu ? PrimaryBtnStyle() : MakeButtonStyle(Brushes.Transparent, Brushes.Transparent, _pal.FgSecondary, false);
+            _btnEn.Style = !_isRu ? PrimaryBtnStyle() : MakeButtonStyle(Brushes.Transparent, Brushes.Transparent, _pal.FgSecondary, false);
+
+            if (_themeMode == "auto") _btnTheme.Content = T("Тема: Авто", "Theme: Auto");
+            else if (_themeMode == "dark") _btnTheme.Content = T("Тема: Тёмная", "Theme: Dark");
+            else _btnTheme.Content = T("Тема: Светлая", "Theme: Light");
+
+            if (!string.IsNullOrEmpty(_availableUpdateTag)) {
+                _btnUpdate.Content = T("Обновление " + _availableUpdateTag, "Update " + _availableUpdateTag);
+                _btnUpdate.Visibility = Visibility.Visible;
+            } else {
+                _btnUpdate.Visibility = Visibility.Collapsed;
+            }
 
             _lblStatusTitle.Text = T("ВИДЕОКАРТЫ NVIDIA И ДВИЖКИ", "NVIDIA GPUS & BACKENDS");
             _lblTdr5m.Text = T("TDR (5 мин):", "TDR (5m):");
             _lblTdrStart.Text = T("С запуска:", "Since start:");
             _valTdr5m.Text = _tdr5m.ToString();
-            _valTdr5m.Foreground = _tdr5m == 0 ? GreenFg : RedFg;
+            _valTdr5m.Foreground = _tdr5m == 0 ? _pal.GreenFg : _pal.RedFg;
             _valTdrStart.Text = _tdrStart.ToString();
-            _valTdrStart.Foreground = _tdrStart == 0 ? GreenFg : RedFg;
+            _valTdrStart.Foreground = _tdrStart == 0 ? _pal.GreenFg : _pal.RedFg;
             _valCpu.Text = _liveCpuText;
             _valFixVram.Text = _liveFixVramText;
 
-            // Service status pill
             var appParts = new List<string>();
             var appKeys = new List<int>(_appliedTargets.Keys); appKeys.Sort();
             foreach (int k in appKeys) {
@@ -875,28 +1020,27 @@ namespace NvKeepAliveUI {
             string appSum = appParts.Count > 0 ? string.Join(", ", appParts.ToArray()) : "-";
 
             if (_serviceRunning && !_servicePaused) {
-                _statusPill.Background = GreenBg; _statusPill.BorderBrush = GreenBorder;
-                _statusDot.Fill = GreenFg; _statusText.Foreground = GreenFg;
+                _statusPill.Background = _pal.GreenBg; _statusPill.BorderBrush = _pal.GreenBorder;
+                _statusDot.Fill = _pal.GreenFg; _statusText.Foreground = _pal.GreenFg;
                 _statusText.Text = T("Работает (" + appSum + ")", "Running (" + appSum + ")");
                 _btnPause.Content = T("Пауза", "Pause");
             } else if (_serviceRunning && _servicePaused) {
-                _statusPill.Background = YellowBg; _statusPill.BorderBrush = YellowBorder;
-                _statusDot.Fill = YellowFg; _statusText.Foreground = YellowFg;
+                _statusPill.Background = _pal.YellowBg; _statusPill.BorderBrush = _pal.YellowBorder;
+                _statusDot.Fill = _pal.YellowFg; _statusText.Foreground = _pal.YellowFg;
                 _statusText.Text = T("На паузе", "Paused");
                 _btnPause.Content = T("Возобновить", "Resume");
             } else {
-                _statusPill.Background = RedBg; _statusPill.BorderBrush = RedBorder;
-                _statusDot.Fill = RedFg; _statusText.Foreground = RedFg;
+                _statusPill.Background = _pal.RedBg; _statusPill.BorderBrush = _pal.RedBorder;
+                _statusDot.Fill = _pal.RedFg; _statusText.Foreground = _pal.RedFg;
                 _statusText.Text = _serviceInstalled ? T("Остановлена", "Stopped") : T("Не установлена", "Not installed");
                 _btnPause.Content = T("Пауза", "Pause");
             }
 
-            // Legend
             if (_vkCheckStatus == "OK") {
-                _vkBadge.Background = GreenBg; _vkBadgeText.Foreground = GreenFg;
+                _vkBadge.Background = _pal.GreenBg; _vkBadgeText.Foreground = _pal.GreenFg;
                 _vkBadgeText.Text = T("Доступен", "Available");
             } else {
-                _vkBadge.Background = YellowBg; _vkBadgeText.Foreground = YellowFg;
+                _vkBadge.Background = _pal.YellowBg; _vkBadgeText.Foreground = _pal.YellowFg;
                 _vkBadgeText.Text = T("Не найден (гайд)", "Missing (guide)");
             }
             _cudaBadgeText.Text = T("Доступен", "Available");
@@ -905,7 +1049,6 @@ namespace NvKeepAliveUI {
             _legendCuda.Text = T("Повышенный расход VRAM (~200-300 MiB). Если нет Vulkan или на карте он нестабилен.",
                                  "Higher VRAM footprint (~200-300 MiB). Use if Vulkan is missing or unstable on a GPU.");
 
-            // Action buttons + dynamic accent (Install/Reinstall -> Test 25s when installed & up-to-date)
             _btnTest.Content = T("Тест 25с", "Test 25s");
             _btnRemove.Content = T("Удалить", "Uninstall");
             bool pending = HasPendingServiceChanges();
@@ -943,7 +1086,7 @@ namespace NvKeepAliveUI {
                 _gpuListPanel.Children.Add(new TextBlock {
                     Text = T("Видеокарты NVIDIA не обнаружены (убедитесь, что драйвер NVIDIA установлен).",
                              "No NVIDIA GPUs detected (verify that an NVIDIA driver is installed)."),
-                    Foreground = RedFg, FontSize = 12, Margin = new Thickness(2, 4, 2, 4)
+                    Foreground = _pal.RedFg, FontSize = 12, Margin = new Thickness(2, 4, 2, 4)
                 });
                 return;
             }
@@ -953,8 +1096,8 @@ namespace NvKeepAliveUI {
                 var g = gpu;
                 bool isSel = multi ? g.Selected : true;
                 var row = new Border {
-                    Background = isSel ? BgRowSel : BgRow,
-                    BorderBrush = isSel ? BorderRowSel : BorderCard,
+                    Background = isSel ? _pal.BgRowSel : _pal.BgRow,
+                    BorderBrush = isSel ? _pal.BorderRowSel : _pal.BorderCard,
                     BorderThickness = new Thickness(1),
                     CornerRadius = new CornerRadius(6),
                     Padding = new Thickness(10, 8, 10, 8),
@@ -963,9 +1106,8 @@ namespace NvKeepAliveUI {
 
                 var dock = new DockPanel();
 
-                // Per-GPU segmented Vulkan | CUDA control
                 var segBorder = new Border {
-                    Background = BgSeg, BorderBrush = BorderSeg, BorderThickness = new Thickness(1),
+                    Background = _pal.BgSeg, BorderBrush = _pal.BorderSeg, BorderThickness = new Thickness(1),
                     CornerRadius = new CornerRadius(5), Padding = new Thickness(2),
                     VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 0, 0),
                     Opacity = isSel ? 1.0 : 0.45
@@ -977,38 +1119,32 @@ namespace NvKeepAliveUI {
                     Padding = new Thickness(8, 3, 8, 3), FontSize = 11,
                     Style = (g.Backend == "vulkan")
                         ? PrimaryBtnStyle()
-                        : MakeButtonStyle(Brushes.Transparent, Brushes.Transparent, vkMissing ? YellowFg : FgSecondary, false)
+                        : MakeButtonStyle(Brushes.Transparent, Brushes.Transparent, vkMissing ? _pal.YellowFg : _pal.FgSecondary, false)
                 };
                 var bCu = new Button {
                     Content = "CUDA", Margin = new Thickness(2, 0, 0, 0),
                     Padding = new Thickness(8, 3, 8, 3), FontSize = 11,
                     Style = (g.Backend == "cuda")
                         ? PrimaryBtnStyle()
-                        : MakeButtonStyle(Brushes.Transparent, Brushes.Transparent, FgSecondary, false)
+                        : MakeButtonStyle(Brushes.Transparent, Brushes.Transparent, _pal.FgSecondary, false)
                 };
                 bVk.Click += (s, e) => {
-                    g.Selected = true;
-                    g.Backend = "vulkan";
+                    g.Selected = true; g.Backend = "vulkan";
                     if (_vkCheckStatus != "OK") ShowVulkanGuideModal();
                     RefreshTextsAndState();
                 };
                 bCu.Click += (s, e) => {
-                    g.Selected = true;
-                    g.Backend = "cuda";
+                    g.Selected = true; g.Backend = "cuda";
                     RefreshTextsAndState();
                 };
-                segSp.Children.Add(bVk);
-                segSp.Children.Add(bCu);
+                segSp.Children.Add(bVk); segSp.Children.Add(bCu);
                 segBorder.Child = segSp;
                 DockPanel.SetDock(segBorder, Dock.Right);
                 dock.Children.Add(segBorder);
 
-                // Left side: optional checkbox (ONLY if 2+ GPUs) + name + live telemetry
                 var leftSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
                 if (multi) {
-                    var cb = new CheckBox {
-                        IsChecked = g.Selected, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0)
-                    };
+                    var cb = new CheckBox { IsChecked = g.Selected, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
                     cb.Checked   += (s, e) => { g.Selected = true; RefreshTextsAndState(); };
                     cb.Unchecked += (s, e) => { g.Selected = false; RefreshTextsAndState(); };
                     leftSp.Children.Add(cb);
@@ -1019,13 +1155,13 @@ namespace NvKeepAliveUI {
                 if (multi) {
                     nameRow.Children.Add(new TextBlock {
                         Text = "[GPU " + g.Index + "] ", FontFamily = new FontFamily("Consolas"), FontSize = 12,
-                        Foreground = Accent, VerticalAlignment = VerticalAlignment.Center
+                        Foreground = _pal.Accent, VerticalAlignment = VerticalAlignment.Center
                     });
                 }
-                nameRow.Children.Add(new TextBlock { Text = g.Name, FontWeight = FontWeights.Medium, Foreground = FgPrimary, VerticalAlignment = VerticalAlignment.Center });
+                nameRow.Children.Add(new TextBlock { Text = g.Name, FontWeight = FontWeights.Medium, Foreground = _pal.FgPrimary, VerticalAlignment = VerticalAlignment.Center });
                 if (g.IsMining) {
-                    var mBdg = new Border { Background = MiningBg, CornerRadius = new CornerRadius(3), Padding = new Thickness(5, 0, 5, 1), Margin = new Thickness(6, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
-                    mBdg.Child = new TextBlock { Text = "CMP / Mining", FontSize = 10, Foreground = MiningFg };
+                    var mBdg = new Border { Background = _pal.MiningBg, CornerRadius = new CornerRadius(3), Padding = new Thickness(5, 0, 5, 1), Margin = new Thickness(6, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+                    mBdg.Child = new TextBlock { Text = "CMP / Mining", FontSize = 10, Foreground = _pal.MiningFg };
                     nameRow.Children.Add(mBdg);
                 }
                 infoSp.Children.Add(nameRow);
@@ -1038,7 +1174,7 @@ namespace NvKeepAliveUI {
                     : "";
                 infoSp.Children.Add(new TextBlock {
                     Text = string.Format("{0}{1}  |  {2}/{3} MiB{4}  |  {5} C  |  {6} W", pciPart, pciePart, g.UsedVram, totVram, fixPart, g.TempC, g.PowerW),
-                    FontFamily = new FontFamily("Consolas"), FontSize = 11, Foreground = FgMuted, Margin = new Thickness(0, 2, 0, 0)
+                    FontFamily = new FontFamily("Consolas"), FontSize = 11, Foreground = _pal.FgMuted, Margin = new Thickness(0, 2, 0, 0)
                 });
                 leftSp.Children.Add(infoSp);
                 dock.Children.Add(leftSp);
@@ -1059,17 +1195,17 @@ namespace NvKeepAliveUI {
                                "Pauses KeepAlive during 40HXInstaller -gen2, fixes Gen2 on chipset/secondary PCIe slots (Bridge Retrain), and restores Gen2 after sleep.");
 
             if (_gen2State == "absent") {
-                _gen2Badge.Background = BtnSecBg; _gen2Badge.BorderBrush = BtnSecBorder; _gen2BadgeText.Foreground = FgSecondary;
+                _gen2Badge.Background = _pal.BtnSecBg; _gen2Badge.BorderBrush = _pal.BtnSecBorder; _gen2BadgeText.Foreground = _pal.FgSecondary;
                 _gen2BadgeText.Text = T("Нет", "Not installed");
                 _btnGen2Sync.Content = T("Установить", "Install");
                 _btnGen2Sync.Style = SecondaryBtnStyle();
             } else if (_gen2State == "unsynced") {
-                _gen2Badge.Background = YellowBg; _gen2Badge.BorderBrush = YellowBorder; _gen2BadgeText.Foreground = YellowFg;
+                _gen2Badge.Background = _pal.YellowBg; _gen2Badge.BorderBrush = _pal.YellowBorder; _gen2BadgeText.Foreground = _pal.YellowFg;
                 _gen2BadgeText.Text = T("Есть (не синхр.)", "Installed (unsynced)");
                 _btnGen2Sync.Content = T("Синхронизировать", "Sync now");
                 _btnGen2Sync.Style = PrimaryBtnStyle();
             } else {
-                _gen2Badge.Background = GreenBg; _gen2Badge.BorderBrush = GreenBorder; _gen2BadgeText.Foreground = GreenFg;
+                _gen2Badge.Background = _pal.GreenBg; _gen2Badge.BorderBrush = _pal.GreenBorder; _gen2BadgeText.Foreground = _pal.GreenFg;
                 string suffix = !string.IsNullOrEmpty(_gen2PcieSummary) ? (" | " + _gen2PcieSummary) : "";
                 _gen2BadgeText.Text = T("Оптимизировано", "Optimized") + suffix;
                 _btnGen2Sync.Content = T("Отключить", "Restore");
@@ -1085,9 +1221,9 @@ namespace NvKeepAliveUI {
 
             _descCoopmat.Text = T("Отключает VK_NV_cooperative_matrix2. Нужно только для стоковых CMP без EFI-анлока (llama.cpp / LM Studio). После анлока выключите.",
                                   "Disables VK_NV_cooperative_matrix2. Only needed for stock CMP GPUs without EFI unlock (llama.cpp / LM Studio). Turn off after unlock.");
-            _toggleTrack.Background = _coopmatDraft ? Accent : BgWindow;
-            _toggleTrack.BorderBrush = _coopmatDraft ? Accent : Br("#8C8C8C");
-            _toggleThumb.Fill = _coopmatDraft ? AccentDarkFg : Br("#CCCCCC");
+            _toggleTrack.Background = _coopmatDraft ? _pal.Accent : _pal.ToggleOffBg;
+            _toggleTrack.BorderBrush = _coopmatDraft ? _pal.Accent : _pal.ToggleOffBorder;
+            _toggleThumb.Fill = _coopmatDraft ? _pal.AccentFg : _pal.ToggleOffThumb;
             _toggleThumb.HorizontalAlignment = _coopmatDraft ? HorizontalAlignment.Right : HorizontalAlignment.Left;
             _coopmatSwitchLbl.Text = _coopmatDraft ? T("Вкл", "On") : T("Выкл", "Off");
             _btnApplyCoopmat.Content = T("Применить", "Apply");
@@ -1095,16 +1231,16 @@ namespace NvKeepAliveUI {
             bool dirty = (_coopmatDraft != _coopmatApplied);
             _btnApplyCoopmat.IsEnabled = dirty;
             if (dirty) {
-                _coopmatAppliedBadge.Background = YellowBg; _coopmatAppliedBadge.BorderBrush = YellowBorder;
-                _coopmatAppliedText.Foreground = YellowFg;
+                _coopmatAppliedBadge.Background = _pal.YellowBg; _coopmatAppliedBadge.BorderBrush = _pal.YellowBorder;
+                _coopmatAppliedText.Foreground = _pal.YellowFg;
                 _coopmatAppliedText.Text = T("Есть изменения", "Unsaved change");
             } else if (_coopmatApplied) {
-                _coopmatAppliedBadge.Background = BlueBadgeBg; _coopmatAppliedBadge.BorderBrush = BorderRowSel;
-                _coopmatAppliedText.Foreground = Accent;
+                _coopmatAppliedBadge.Background = _pal.BlueBadgeBg; _coopmatAppliedBadge.BorderBrush = _pal.BorderRowSel;
+                _coopmatAppliedText.Foreground = _pal.Accent;
                 _coopmatAppliedText.Text = T("В системе: Вкл", "Applied: On");
             } else {
-                _coopmatAppliedBadge.Background = Br("#2F2F2F"); _coopmatAppliedBadge.BorderBrush = BorderCard;
-                _coopmatAppliedText.Foreground = FgSecondary;
+                _coopmatAppliedBadge.Background = _pal.NeutralBadgeBg; _coopmatAppliedBadge.BorderBrush = _pal.BorderCard;
+                _coopmatAppliedText.Foreground = _pal.FgSecondary;
                 _coopmatAppliedText.Text = T("В системе: Выкл", "Applied: Off");
             }
         }
@@ -1126,10 +1262,7 @@ namespace NvKeepAliveUI {
             }
             bool needsVulkan = false;
             foreach (var g in sel) if (g.Backend == "vulkan") needsVulkan = true;
-            if (needsVulkan && _vkCheckStatus != "OK") {
-                ShowVulkanGuideModal();
-                return;
-            }
+            if (needsVulkan && _vkCheckStatus != "OK") { ShowVulkanGuideModal(); return; }
             if (!File.Exists(_daemonSourceExe)) {
                 MessageBox.Show(this, T("Не найден файл NvKeepAlive.exe рядом с программой.", "NvKeepAlive.exe was not found next to NvKeepAliveUI.exe."), "NV-KeepAlive", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
@@ -1192,7 +1325,6 @@ namespace NvKeepAliveUI {
             if (r != MessageBoxResult.Yes) return;
 
             try {
-                // Restore Gen2 Unlock task if it was synced before removing InstallDir
                 if (_gen2State == "synced") RestoreGen2Task();
                 StopRunningService();
                 string dummy;
@@ -1223,7 +1355,7 @@ namespace NvKeepAliveUI {
             _testProgressWrap.Visibility = Visibility.Visible;
             _testProgressBar.Value = 0;
             _testProgressPct.Text = "0%";
-            _testProgressLbl.Foreground = FgSecondary;
+            _testProgressLbl.Foreground = _pal.FgSecondary;
             _testProgressLbl.Text = T("Проверка анти-TDR (25с)...", "Running anti-TDR self-test (25s)...");
             _btnTest.IsEnabled = false;
 
@@ -1254,7 +1386,7 @@ namespace NvKeepAliveUI {
                     Dispatcher.BeginInvoke((Action)(() => {
                         _testRunning = false;
                         _btnTest.IsEnabled = true;
-                        _testProgressLbl.Foreground = errs == 0 ? GreenFg : RedFg;
+                        _testProgressLbl.Foreground = errs == 0 ? _pal.GreenFg : _pal.RedFg;
                         _testProgressLbl.Text = errs == 0
                             ? T("Тест пройден: 0 сбоев nvlddmkm за 25с (защита работает)", "Test passed: 0 nvlddmkm errors in 25s (protection active)")
                             : T("Обнаружено сбоев nvlddmkm: " + errs, "Detected nvlddmkm errors: " + errs);
@@ -1264,6 +1396,7 @@ namespace NvKeepAliveUI {
                     Dispatcher.BeginInvoke((Action)(() => {
                         _testRunning = false;
                         _btnTest.IsEnabled = true;
+                        _testProgressLbl.Foreground = _pal.RedFg;
                         _testProgressLbl.Text = "Error: " + ex.Message;
                     }));
                 } finally {
@@ -1289,10 +1422,7 @@ namespace NvKeepAliveUI {
         }
 
         void OnGen2SyncClick(object sender, RoutedEventArgs e) {
-            if (_gen2State == "absent") {
-                ShowGen2InfoModal();
-                return;
-            }
+            if (_gen2State == "absent") { ShowGen2InfoModal(); return; }
             if (_gen2State == "synced") {
                 try {
                     RestoreGen2Task();
@@ -1305,12 +1435,9 @@ namespace NvKeepAliveUI {
                 return;
             }
 
-            // Sync: backup original task, create wrapper with pause + original 40HXInstaller + our --retrain-gen2 + wake trigger
             try {
                 Directory.CreateDirectory(InstallDir);
-                if (!File.Exists(InstalledExe) && File.Exists(_daemonSourceExe)) {
-                    File.Copy(_daemonSourceExe, InstalledExe, true);
-                }
+                if (!File.Exists(InstalledExe) && File.Exists(_daemonSourceExe)) File.Copy(_daemonSourceExe, InstalledExe, true);
 
                 string xmlOut;
                 if (RunProcessCapture("schtasks.exe", "/Query /TN \"" + Gen2TaskName + "\" /XML", 5000, out xmlOut) != 0 || string.IsNullOrEmpty(xmlOut))
@@ -1320,8 +1447,8 @@ namespace NvKeepAliveUI {
                 var mArg = Regex.Match(xmlOut, @"<Arguments>(.*?)</Arguments>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
                 if (!mCmd.Success) throw new Exception("Task XML has no <Command> element.");
 
-                string origExe = System.Net.WebUtility.HtmlDecode(mCmd.Groups[1].Value).Trim().Trim('"');
-                string origArgs = mArg.Success ? System.Net.WebUtility.HtmlDecode(mArg.Groups[1].Value).Trim() : "-gen2 -silent";
+                string origExe = WebUtility.HtmlDecode(mCmd.Groups[1].Value).Trim().Trim('"');
+                string origArgs = mArg.Success ? WebUtility.HtmlDecode(mArg.Groups[1].Value).Trim() : "-gen2 -silent";
 
                 if (!File.Exists(Gen2OrigXmlPath)) File.WriteAllText(Gen2OrigXmlPath, xmlOut, Encoding.Unicode);
                 File.WriteAllText(Gen2OrigCmdPath, origExe + Environment.NewLine + origArgs, Encoding.UTF8);
@@ -1343,7 +1470,6 @@ namespace NvKeepAliveUI {
                     "endlocal\r\n";
                 File.WriteAllText(Gen2WrapperPath, wrapper, Encoding.ASCII);
 
-                // Update task action + add Wake-from-Sleep trigger (Event ID 1 Power-Troubleshooter)
                 string ps =
                     "$ErrorActionPreference='Stop';" +
                     "$t = Get-ScheduledTask -TaskName '" + Gen2TaskName + "';" +
@@ -1363,7 +1489,6 @@ namespace NvKeepAliveUI {
                 CheckGen2Status();
                 AppendUiLog("Synced '" + Gen2TaskName + "' with NV-KeepAlive pause + built-in PCIe Gen2 chipset-bridge retrain + wake trigger.");
 
-                // Run immediate retrain check in background (no-op if already Gen2)
                 ThreadPool.QueueUserWorkItem(_ => {
                     string dummy;
                     string exe = File.Exists(InstalledExe) ? InstalledExe : _daemonSourceExe;
@@ -1401,7 +1526,13 @@ namespace NvKeepAliveUI {
                     p.Dispose();
                 }
             } catch {}
-            Thread.Sleep(300);
+            for (int i = 0; i < 12; i++) {
+                var rem = Process.GetProcessesByName("NvKeepAlive");
+                bool any = rem.Length > 0;
+                foreach (var r in rem) r.Dispose();
+                if (!any) break;
+                Thread.Sleep(200);
+            }
         }
 
         // ===================== Modal 1: Vulkan Missing Installation Guide =====================
@@ -1410,30 +1541,30 @@ namespace NvKeepAliveUI {
                 Title = T("Vulkan Runtime не обнаружен", "Vulkan Runtime Not Found"),
                 Width = 510, SizeToContent = SizeToContent.Height,
                 Owner = this, WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                ResizeMode = ResizeMode.NoResize, Background = Br("#242424"), Foreground = FgPrimary,
+                ResizeMode = ResizeMode.NoResize, Background = _pal.BgModal, Foreground = _pal.FgPrimary,
                 FontFamily = FontFamily, FontSize = 12.5
             };
-            dlg.SourceInitialized += (s, e) => ApplyDarkTitleBar(dlg);
+            dlg.SourceInitialized += (s, e) => ApplyTitleBarTheme(dlg, _pal.IsDark);
 
             var sp = new StackPanel { Margin = new Thickness(16) };
             string reason = (_vkCheckStatus == "NO_LOADER")
                 ? T("Причина: отсутствует системная библиотека vulkan-1.dll (Vulkan Loader).", "Reason: system vulkan-1.dll (Vulkan Loader) is missing.")
                 : T("Причина: vulkan-1.dll найден, но драйвер NVIDIA не зарегистрировал Vulkan ICD.", "Reason: vulkan-1.dll found, but NVIDIA driver has no Vulkan ICD registered.");
-            sp.Children.Add(new TextBlock { Text = reason, Foreground = YellowFg, FontFamily = new FontFamily("Consolas"), FontSize = 11.5, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8) });
+            sp.Children.Add(new TextBlock { Text = reason, Foreground = _pal.YellowFg, FontFamily = new FontFamily("Consolas"), FontSize = 11.5, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8) });
             sp.Children.Add(new TextBlock {
                 Text = T("Для работы лёгкого движка Vulkan Compute (~5-20 MiB VRAM) требуется системный Vulkan Runtime и поддержка Vulkan в драйвере NVIDIA. Выберите один из вариантов:",
                          "The lightweight Vulkan Compute backend (~5-20 MiB VRAM) requires the system Vulkan Runtime and NVIDIA Vulkan ICD. Choose one of the options below:"),
-                Foreground = Br("#CCCCCC"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 10)
+                Foreground = _pal.FgPrimary, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 10)
             });
 
             Action<string, string, string, string> addStep = (title, body, linkLbl, url) => {
                 var c = new StackPanel();
-                c.Children.Add(new TextBlock { Text = title, FontWeight = FontWeights.SemiBold, Foreground = FgPrimary, Margin = new Thickness(0, 0, 0, 2) });
-                c.Children.Add(new TextBlock { Text = body, Foreground = FgSecondary, FontSize = 11.5, TextWrapping = TextWrapping.Wrap });
+                c.Children.Add(new TextBlock { Text = title, FontWeight = FontWeights.SemiBold, Foreground = _pal.FgPrimary, Margin = new Thickness(0, 0, 0, 2) });
+                c.Children.Add(new TextBlock { Text = body, Foreground = _pal.FgSecondary, FontSize = 11.5, TextWrapping = TextWrapping.Wrap });
                 if (!string.IsNullOrEmpty(url)) {
                     var lnk = new Button {
                         Content = linkLbl, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 4, 0, 0),
-                        Padding = new Thickness(0), Style = MakeButtonStyle(Brushes.Transparent, Brushes.Transparent, Accent, true)
+                        Padding = new Thickness(0), Style = MakeButtonStyle(Brushes.Transparent, Brushes.Transparent, _pal.Accent, true)
                     };
                     lnk.Click += (s, e) => OpenUrl(url);
                     c.Children.Add(lnk);
@@ -1473,12 +1604,12 @@ namespace NvKeepAliveUI {
                 CheckVulkanNow();
                 feedbackBox.Visibility = Visibility.Visible;
                 if (_vkCheckStatus == "OK") {
-                    feedbackBox.Background = GreenBg; feedbackBox.BorderBrush = GreenBorder; feedbackTxt.Foreground = GreenFg;
+                    feedbackBox.Background = _pal.GreenBg; feedbackBox.BorderBrush = _pal.GreenBorder; feedbackTxt.Foreground = _pal.GreenFg;
                     feedbackTxt.Text = T("Vulkan обнаружен! Окно закроется автоматически.", "Vulkan detected! Closing dialog.");
                     RefreshTextsAndState();
                     dlg.Close();
                 } else {
-                    feedbackBox.Background = RedBg; feedbackBox.BorderBrush = RedBorder; feedbackTxt.Foreground = RedFg;
+                    feedbackBox.Background = _pal.RedBg; feedbackBox.BorderBrush = _pal.RedBorder; feedbackTxt.Foreground = _pal.RedFg;
                     feedbackTxt.Text = T("Vulkan всё ещё не обнаружен (" + _vkCheckStatus + ").", "Vulkan is still not detected (" + _vkCheckStatus + ").");
                 }
             };
@@ -1502,10 +1633,10 @@ namespace NvKeepAliveUI {
                 Title = "CMP40HX-Unlock (PCIe Gen2 / EFI Unlock)",
                 Width = 470, SizeToContent = SizeToContent.Height,
                 Owner = this, WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                ResizeMode = ResizeMode.NoResize, Background = Br("#242424"), Foreground = FgPrimary,
+                ResizeMode = ResizeMode.NoResize, Background = _pal.BgModal, Foreground = _pal.FgPrimary,
                 FontFamily = FontFamily, FontSize = 12.5
             };
-            dlg.SourceInitialized += (s, e) => ApplyDarkTitleBar(dlg);
+            dlg.SourceInitialized += (s, e) => ApplyTitleBarTheme(dlg, _pal.IsDark);
 
             var sp = new StackPanel { Margin = new Thickness(16) };
 
@@ -1513,30 +1644,30 @@ namespace NvKeepAliveUI {
             var stBdg = new Border { CornerRadius = new CornerRadius(9), BorderThickness = new Thickness(1), Padding = new Thickness(8, 2, 8, 2) };
             var stTxt = new TextBlock { FontSize = 11.5, FontWeight = FontWeights.Medium };
             if (_gen2State == "absent") {
-                stBdg.Background = BtnSecBg; stBdg.BorderBrush = BtnSecBorder; stTxt.Foreground = FgSecondary;
+                stBdg.Background = _pal.BtnSecBg; stBdg.BorderBrush = _pal.BtnSecBorder; stTxt.Foreground = _pal.FgSecondary;
                 stTxt.Text = T("Нет", "Not installed");
             } else if (_gen2State == "unsynced") {
-                stBdg.Background = YellowBg; stBdg.BorderBrush = YellowBorder; stTxt.Foreground = YellowFg;
+                stBdg.Background = _pal.YellowBg; stBdg.BorderBrush = _pal.YellowBorder; stTxt.Foreground = _pal.YellowFg;
                 stTxt.Text = T("Есть (не синхр.)", "Installed (unsynced)");
             } else {
-                stBdg.Background = GreenBg; stBdg.BorderBrush = GreenBorder; stTxt.Foreground = GreenFg;
+                stBdg.Background = _pal.GreenBg; stBdg.BorderBrush = _pal.GreenBorder; stTxt.Foreground = _pal.GreenFg;
                 stTxt.Text = T("Оптимизировано", "Optimized") + (string.IsNullOrEmpty(_gen2PcieSummary) ? "" : (" | " + _gen2PcieSummary));
             }
             stBdg.Child = stTxt;
             DockPanel.SetDock(stBdg, Dock.Right);
             stDock.Children.Add(stBdg);
-            stDock.Children.Add(new TextBlock { Text = T("Статус в системе:", "System status:"), Foreground = FgMuted, VerticalAlignment = VerticalAlignment.Center });
+            stDock.Children.Add(new TextBlock { Text = T("Статус в системе:", "System status:"), Foreground = _pal.FgMuted, VerticalAlignment = VerticalAlignment.Center });
             sp.Children.Add(MakeCard(stDock, new Thickness(10, 8, 10, 8)));
 
             sp.Children.Add(new TextBlock {
                 Text = T("CMP40HX-Unlock (Cyridd/cmpunlocker) - сторонний открытый проект для NVIDIA CMP 40HX (DEV=0x1F0B): разблокирует полные вычисления FP16/Tensor Cores, 8 GiB Resizable BAR и переключение PCIe с Gen1 на Gen2.",
                          "CMP40HX-Unlock (Cyridd/cmpunlocker) is an independent open-source project for NVIDIA CMP 40HX (DEV=0x1F0B) that unlocks full FP16/Tensor Core compute, 8 GiB Resizable BAR, and PCIe Gen2 speed."),
-                Foreground = Br("#CCCCCC"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8)
+                Foreground = _pal.FgPrimary, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8)
             });
             sp.Children.Add(new TextBlock {
                 Text = T("Синхронизация в NV-KeepAlive выполняет 3 вещи: ставит KeepAlive на паузу во время запуска 40HXInstaller -gen2, запускает наш фикс чипсетного PCIe-моста (дожимает Gen1 -> Gen2 на нижних слотах, где 40HXInstaller не находит Root Port) и восстанавливает Gen2 после пробуждения из сна.",
                          "NV-KeepAlive sync performs 3 steps: pauses KeepAlive while 40HXInstaller -gen2 runs, runs our built-in PCIe chipset-bridge retrain fix (lifts Gen1 -> Gen2 in secondary slots where 40HXInstaller misses the Root Port), and restores Gen2 after waking from sleep."),
-                Foreground = FgSecondary, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 12)
+                Foreground = _pal.FgSecondary, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 12)
             });
 
             var btns = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
@@ -1602,9 +1733,11 @@ namespace NvKeepAliveUI {
         static int Main(string[] args) {
             bool noElevate = false;
             int autoCloseSec = 0;
+            string themeMode = "auto";
             for (int i = 0; i < args.Length; i++) {
                 if (args[i] == "--no-elevate") noElevate = true;
                 else if (args[i] == "--autoclose" && i + 1 < args.Length) int.TryParse(args[++i], out autoCloseSec);
+                else if (args[i] == "--theme" && i + 1 < args.Length) themeMode = args[++i].ToLowerInvariant();
             }
 
             if (!noElevate && !IsAdministrator()) {
@@ -1615,13 +1748,11 @@ namespace NvKeepAliveUI {
                         Verb = "runas"
                     });
                     return 0;
-                } catch {
-                    // User cancelled UAC; continue in read-only mode
-                }
+                } catch {}
             }
 
             var app = new Application();
-            var win = new MainWindow();
+            var win = new MainWindow(themeMode);
             if (autoCloseSec > 0) {
                 var t = new DispatcherTimer { Interval = TimeSpan.FromSeconds(autoCloseSec) };
                 t.Tick += (s, e) => { t.Stop(); win.Close(); };
