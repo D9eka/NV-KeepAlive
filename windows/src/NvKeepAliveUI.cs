@@ -22,6 +22,7 @@ namespace NvKeepAliveUI {
     public class GpuItem {
         public int Index;
         public string PciBusId;
+        public string Luid;
         public string Name;
         public string DeviceIdHex;
         public ulong TotalVramMiB;
@@ -30,9 +31,10 @@ namespace NvKeepAliveUI {
         public bool HasVulkan;
         public bool HasCuda;
 
-        // Live telemetry from nvidia-smi
+        // Live telemetry from nvidia-smi & Windows GPU Process Memory counter
         public string UsedVram = "0";
         public string LiveTotalVram = "";
+        public double? DaemonVramMiB = null;
         public string TempC = "-";
         public string PowerW = "-";
         public string PcieText = "";
@@ -48,6 +50,7 @@ namespace NvKeepAliveUI {
         const string Gen2TaskName = "40HX PCIe Gen2 Bring-up";
         const string MutexName = "Global\\NvKeepAliveMutex";
         const string UnlockerUrl = "https://github.com/Cyridd/cmpunlocker/releases";
+        const string UnlockerRepoUrl = "https://github.com/Cyridd/cmpunlocker";
         const string LunarGUrl = "https://vulkan.lunarg.com/sdk/home#windows";
         const string NvidiaDrvUrl = "https://www.nvidia.com/drivers";
 
@@ -121,11 +124,14 @@ namespace NvKeepAliveUI {
         DateTime _sessionStart = DateTime.Now;
         int _tdr5m = 0, _tdrStart = 0;
 
-        // Live CPU calculation
+        // Live CPU & Daemon VRAM calculation
         int _lastPid = -1;
         TimeSpan _lastCpuTime = TimeSpan.Zero;
         DateTime _lastCpuWall = DateTime.MinValue;
         string _liveCpuText = "-";
+        string _liveFixVramText = "-";
+        int _vramCachePid = -1;
+        Dictionary<string, PerformanceCounter> _vramCounters = new Dictionary<string, PerformanceCounter>(StringComparer.OrdinalIgnoreCase);
 
         // Vulkan probe
         string _vkCheckStatus = "OK"; // OK | NO_LOADER | NO_NVIDIA_ICD
@@ -146,7 +152,7 @@ namespace NvKeepAliveUI {
 
         // UI Controls
         Button _btnRu, _btnEn;
-        TextBlock _lblStatusTitle, _lblTdr5m, _valTdr5m, _lblTdrStart, _valTdrStart, _valCpu;
+        TextBlock _lblStatusTitle, _lblTdr5m, _valTdr5m, _lblTdrStart, _valTdrStart, _valCpu, _valFixVram;
         Border _statusPill; Ellipse _statusDot; TextBlock _statusText;
         StackPanel _gpuListPanel;
         Border _pendingHintBox; TextBlock _pendingHintText;
@@ -182,7 +188,7 @@ namespace NvKeepAliveUI {
 
             SourceInitialized += (s, e) => ApplyDarkTitleBar(this);
             Loaded += OnLoaded;
-            Closed += (s, e) => { if (_pollTimer != null) _pollTimer.Stop(); };
+            Closed += (s, e) => { if (_pollTimer != null) _pollTimer.Stop(); DisposeVramCounters(); };
 
             BuildUi();
         }
@@ -300,10 +306,13 @@ namespace NvKeepAliveUI {
             _lblTdrStart = new TextBlock { FontSize = 11.5, Foreground = FgMuted, Margin = new Thickness(0, 0, 3, 0) };
             _valTdrStart = new TextBlock { FontSize = 11.5, FontFamily = new FontFamily("Consolas"), FontWeight = FontWeights.Bold, Foreground = GreenFg, Text = "0", Margin = new Thickness(0, 0, 8, 0) };
             var lblCpu = new TextBlock { FontSize = 11.5, Foreground = FgMuted, Text = "CPU: " };
-            _valCpu = new TextBlock { FontSize = 11.5, FontFamily = new FontFamily("Consolas"), FontWeight = FontWeights.Bold, Foreground = FgPrimary, Text = "-" };
+            _valCpu = new TextBlock { FontSize = 11.5, FontFamily = new FontFamily("Consolas"), FontWeight = FontWeights.Bold, Foreground = FgPrimary, Text = "-", Margin = new Thickness(0, 0, 8, 0) };
+            var lblFixVram = new TextBlock { FontSize = 11.5, Foreground = FgMuted, Text = "VRAM: " };
+            _valFixVram = new TextBlock { FontSize = 11.5, FontFamily = new FontFamily("Consolas"), FontWeight = FontWeights.Bold, Foreground = Accent, Text = "-" };
             metricsSp.Children.Add(_lblTdr5m); metricsSp.Children.Add(_valTdr5m);
             metricsSp.Children.Add(_lblTdrStart); metricsSp.Children.Add(_valTdrStart);
             metricsSp.Children.Add(lblCpu); metricsSp.Children.Add(_valCpu);
+            metricsSp.Children.Add(lblFixVram); metricsSp.Children.Add(_valFixVram);
             b1Head.Children.Add(metricsSp);
             b1.Children.Add(b1Head);
 
@@ -513,6 +522,7 @@ namespace NvKeepAliveUI {
                     var g = new GpuItem {
                         Index = idx,
                         PciBusId = p[1] == "-" ? "" : p[1],
+                        Luid = (p.Length >= 10 && p[9] != "-") ? p[9] : "",
                         Name = p[2],
                         DeviceIdHex = p[3],
                         TotalVramMiB = vram,
@@ -612,13 +622,55 @@ namespace NvKeepAliveUI {
                 _gen2State = "unsynced";
         }
 
+        void DisposeVramCounters() {
+            foreach (var kv in _vramCounters) { try { kv.Value.Dispose(); } catch {} }
+            _vramCounters.Clear();
+            _vramCachePid = -1;
+        }
+
+        Dictionary<string, double> ReadDaemonVramByLuid(int pid, List<string> luids) {
+            var res = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+            if (pid <= 0 || luids == null || luids.Count == 0) {
+                DisposeVramCounters();
+                return res;
+            }
+            if (_vramCachePid != pid) {
+                DisposeVramCounters();
+                _vramCachePid = pid;
+            }
+            foreach (string luid in luids) {
+                if (string.IsNullOrEmpty(luid)) continue;
+                try {
+                    PerformanceCounter pc;
+                    if (!_vramCounters.TryGetValue(luid, out pc)) {
+                        string instName = string.Format("pid_{0}_{1}_phys_0", pid, luid);
+                        pc = new PerformanceCounter("GPU Process Memory", "Dedicated Usage", instName, true);
+                        _vramCounters[luid] = pc;
+                    }
+                    double mib = pc.NextValue() / (1024.0 * 1024.0);
+                    if (mib < 0) mib = 0;
+                    res[luid] = mib;
+                } catch {
+                    PerformanceCounter bad;
+                    if (_vramCounters.TryGetValue(luid, out bad)) {
+                        try { bad.Dispose(); } catch {}
+                        _vramCounters.Remove(luid);
+                    }
+                }
+            }
+            return res;
+        }
+
         void TriggerBackgroundPoll() {
             if (_pollBusy) return;
             _pollBusy = true;
+            var gpuLuids = new List<string>();
+            foreach (var g in _gpus) if (!string.IsNullOrEmpty(g.Luid)) gpuLuids.Add(g.Luid);
             ThreadPool.QueueUserWorkItem(_ => {
                 try {
-                    // 1. Service running / paused / live CPU%
+                    // 1. Service running / paused / live CPU% / live Daemon VRAM
                     bool running = false;
+                    int daemonPid = -1;
                     string cpuTxt = "-";
                     DateTime? procStart = null;
                     try {
@@ -631,6 +683,7 @@ namespace NvKeepAliveUI {
                         if (procs.Length > 0) {
                             running = true;
                             var p = procs[0];
+                            daemonPid = p.Id;
                             try {
                                 procStart = p.StartTime;
                                 TimeSpan curCpu = p.TotalProcessorTime;
@@ -660,6 +713,18 @@ namespace NvKeepAliveUI {
 
                     bool paused = File.Exists(PauseFile);
                     if (paused && running) cpuTxt = "0.00%";
+
+                    var daemonVramMap = running ? ReadDaemonVramByLuid(daemonPid, gpuLuids) : ReadDaemonVramByLuid(-1, null);
+                    string fixVramTxt = "-";
+                    if (running) {
+                        if (paused) {
+                            fixVramTxt = "0.0 MiB";
+                        } else if (daemonVramMap.Count > 0) {
+                            double sumMiB = 0;
+                            foreach (var kv in daemonVramMap) sumMiB += kv.Value;
+                            fixVramTxt = sumMiB.ToString("F1", CultureInfo.InvariantCulture) + " MiB";
+                        }
+                    }
 
                     // 2. Live nvidia-smi telemetry (PCI Bus ID, VRAM, Temp, Power, PCIe Max Gen & Width)
                     string smiOut;
@@ -698,12 +763,20 @@ namespace NvKeepAliveUI {
                         _serviceRunning = running;
                         _servicePaused = paused;
                         _liveCpuText = cpuTxt;
+                        _liveFixVramText = fixVramTxt;
                         _tdr5m = tdr5;
                         _tdrStart = tdrS;
 
                         string pcie40 = "";
                         for (int i = 0; i < _gpus.Count; i++) {
                             var g = _gpus[i];
+                            double dv;
+                            if (running && !paused && !string.IsNullOrEmpty(g.Luid) && daemonVramMap.TryGetValue(g.Luid, out dv))
+                                g.DaemonVramMiB = dv;
+                            else if (running && paused)
+                                g.DaemonVramMiB = 0.0;
+                            else
+                                g.DaemonVramMiB = null;
                             string[] cols = null;
                             if (!string.IsNullOrEmpty(g.PciBusId) && smiMap.ContainsKey(g.PciBusId)) cols = smiMap[g.PciBusId];
                             else if (i < smiList.Count) cols = smiList[i];
@@ -790,6 +863,7 @@ namespace NvKeepAliveUI {
             _valTdrStart.Text = _tdrStart.ToString();
             _valTdrStart.Foreground = _tdrStart == 0 ? GreenFg : RedFg;
             _valCpu.Text = _liveCpuText;
+            _valFixVram.Text = _liveFixVramText;
 
             // Service status pill
             var appParts = new List<string>();
@@ -959,8 +1033,11 @@ namespace NvKeepAliveUI {
                 string totVram = !string.IsNullOrEmpty(g.LiveTotalVram) ? g.LiveTotalVram : g.TotalVramMiB.ToString();
                 string pciPart = !string.IsNullOrEmpty(g.PciBusId) ? g.PciBusId : g.DeviceIdHex;
                 string pciePart = !string.IsNullOrEmpty(g.PcieText) ? ("  |  " + g.PcieText) : "";
+                string fixPart = g.DaemonVramMiB.HasValue
+                    ? string.Format(" ({0}: {1} MiB)", T("фикс", "fix"), g.DaemonVramMiB.Value.ToString("F1", CultureInfo.InvariantCulture))
+                    : "";
                 infoSp.Children.Add(new TextBlock {
-                    Text = string.Format("{0}{1}  |  {2}/{3} MiB  |  {4} C  |  {5} W", pciPart, pciePart, g.UsedVram, totVram, g.TempC, g.PowerW),
+                    Text = string.Format("{0}{1}  |  {2}/{3} MiB{4}  |  {5} C  |  {6} W", pciPart, pciePart, g.UsedVram, totVram, fixPart, g.TempC, g.PowerW),
                     FontFamily = new FontFamily("Consolas"), FontSize = 11, Foreground = FgMuted, Margin = new Thickness(0, 2, 0, 0)
                 });
                 leftSp.Children.Add(infoSp);
@@ -1146,6 +1223,7 @@ namespace NvKeepAliveUI {
             _testProgressWrap.Visibility = Visibility.Visible;
             _testProgressBar.Value = 0;
             _testProgressPct.Text = "0%";
+            _testProgressLbl.Foreground = FgSecondary;
             _testProgressLbl.Text = T("Проверка анти-TDR (25с)...", "Running anti-TDR self-test (25s)...");
             _btnTest.IsEnabled = false;
 
@@ -1176,9 +1254,10 @@ namespace NvKeepAliveUI {
                     Dispatcher.BeginInvoke((Action)(() => {
                         _testRunning = false;
                         _btnTest.IsEnabled = true;
+                        _testProgressLbl.Foreground = errs == 0 ? GreenFg : RedFg;
                         _testProgressLbl.Text = errs == 0
-                            ? T("Тест пройден: 0 ошибок nvlddmkm за 25с", "Self-test passed: 0 nvlddmkm errors in 25s")
-                            : T("Обнаружено ошибок nvlddmkm: " + errs, "Detected nvlddmkm errors: " + errs);
+                            ? T("Тест пройден: 0 сбоев nvlddmkm за 25с (защита работает)", "Test passed: 0 nvlddmkm errors in 25s (protection active)")
+                            : T("Обнаружено сбоев nvlddmkm: " + errs, "Detected nvlddmkm errors: " + errs);
                         AppendUiLog(string.Format("25s anti-TDR test finished (targets={0}): {1} nvlddmkm errors.", targets, errs));
                     }));
                 } catch (Exception ex) {
@@ -1461,9 +1540,14 @@ namespace NvKeepAliveUI {
             });
 
             var btns = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
-            var bInst = new Button { Content = T("Установить", "Install"), Style = PrimaryBtnStyle(), Margin = new Thickness(0, 0, 8, 0) };
+            bool isInstalled = (_gen2State != "absent");
+            var bInst = new Button {
+                Content = isInstalled ? T("Посетить", "Visit GitHub") : T("Установить", "Install"),
+                Style = isInstalled ? SecondaryBtnStyle() : PrimaryBtnStyle(),
+                Margin = new Thickness(0, 0, 8, 0)
+            };
             var bClose = new Button { Content = T("Закрыть", "Close"), Style = SecondaryBtnStyle() };
-            bInst.Click += (s, e) => OpenUrl(UnlockerUrl);
+            bInst.Click += (s, e) => OpenUrl(isInstalled ? UnlockerRepoUrl : UnlockerUrl);
             bClose.Click += (s, e) => dlg.Close();
             btns.Children.Add(bInst); btns.Children.Add(bClose);
             sp.Children.Add(btns);

@@ -24,6 +24,7 @@ class NvKeepAlive {
     [DllImport("nvcuda.dll")] static extern int cuDeviceGet(out int device, int ordinal);
     [DllImport("nvcuda.dll")] static extern int cuDeviceGetName(byte[] name, int len, int dev);
     [DllImport("nvcuda.dll")] static extern int cuDeviceGetPCIBusId(byte[] pciBusId, int len, int dev);
+    [DllImport("nvcuda.dll")] static extern int cuDeviceGetLuid(byte[] luid, out uint deviceNodeMask, int dev);
     [DllImport("nvcuda.dll")] static extern int cuDeviceTotalMem_v2(out UIntPtr bytes, int dev);
     [DllImport("nvcuda.dll")] static extern int cuCtxCreate_v2(out IntPtr pctx, uint flags, int dev);
     [DllImport("nvcuda.dll")] static extern int cuCtxDestroy_v2(IntPtr ctx);
@@ -61,6 +62,7 @@ class NvKeepAlive {
     const uint VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO = 40;
     const uint VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO = 42;
     const uint VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 = 1000059001;
+    const uint VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES = 1000071004;
     const uint VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT = 1000212000;
 
     const uint VK_QUEUE_COMPUTE_BIT = 0x00000002;
@@ -295,6 +297,7 @@ class NvKeepAlive {
         public ulong VramMiB;
         public uint ComputeQueueFamily;
         public string PciBusId; // "0000:04:00.0" or ""
+        public string Luid;     // "luid_0x00000000_0x000139A8" or ""
     }
 
     class CudaGpuInfo {
@@ -302,11 +305,13 @@ class NvKeepAlive {
         public string Name;
         public ulong VramMiB;
         public string PciBusId; // "0000:04:00.0" or ""
+        public string Luid;     // "luid_0x00000000_0x000139A8" or ""
     }
 
     class CanonicalGpu {
         public int Index;
         public string PciBusId;
+        public string Luid;
         public string Name;
         public uint DeviceId;
         public ulong VramMiB;
@@ -505,37 +510,59 @@ class NvKeepAlive {
         return inst;
     }
 
-    static string TryGetVkPciBusId(IntPtr inst, IntPtr pdev) {
+    static string FormatLuidBytes(byte[] raw8, int offset) {
+        uint low = BitConverter.ToUInt32(raw8, offset);
+        uint high = BitConverter.ToUInt32(raw8, offset + 4);
+        if (low == 0 && high == 0) return "";
+        return string.Format("luid_0x{0:X8}_0x{1:X8}", high, low);
+    }
+
+    static void TryGetVkPciAndLuid(IntPtr inst, IntPtr pdev, out string pciBusId, out string luidStr) {
+        pciBusId = "";
+        luidStr = "";
         try {
             IntPtr pFn = vkGetInstanceProcAddr(inst, "vkGetPhysicalDeviceProperties2");
             if (pFn == IntPtr.Zero) pFn = vkGetInstanceProcAddr(inst, "vkGetPhysicalDeviceProperties2KHR");
-            if (pFn == IntPtr.Zero) return "";
+            if (pFn == IntPtr.Zero) return;
             var fn = (FnVkGetPhysicalDeviceProperties2)Marshal.GetDelegateForFunctionPointer(pFn, typeof(FnVkGetPhysicalDeviceProperties2));
 
+            // VkPhysicalDeviceIDProperties (x64): sType(0), pNext(8), deviceUUID(16..31), driverUUID(32..47), deviceLUID(48..55), nodeMask(56), luidValid(60)
+            IntPtr pId = Marshal.AllocHGlobal(64);
             var pci = new VkPhysicalDevicePCIBusInfoPropertiesEXT {
                 sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT,
-                pNext = IntPtr.Zero,
+                pNext = pId,
                 pciDomain = 0xFFFFFFFFu
             };
             IntPtr pPci = Marshal.AllocHGlobal(Marshal.SizeOf(pci));
             IntPtr pProps2 = Marshal.AllocHGlobal(1024);
             try {
+                byte[] idZeros = new byte[64];
+                Marshal.Copy(idZeros, 0, pId, 64);
+                Marshal.WriteInt32(pId, 0, unchecked((int)VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES));
+                Marshal.WriteIntPtr(pId, IntPtr.Size, IntPtr.Zero);
+
                 Marshal.StructureToPtr(pci, pPci, false);
                 byte[] zeros = new byte[1024];
                 Marshal.Copy(zeros, 0, pProps2, 1024);
                 Marshal.WriteInt32(pProps2, 0, unchecked((int)VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2));
-                Marshal.WriteIntPtr(pProps2, IntPtr.Size, pPci); // 8-byte aligned on x64
+                Marshal.WriteIntPtr(pProps2, IntPtr.Size, pPci);
+
                 fn(pdev, pProps2);
+
                 pci = (VkPhysicalDevicePCIBusInfoPropertiesEXT)Marshal.PtrToStructure(pPci, typeof(VkPhysicalDevicePCIBusInfoPropertiesEXT));
                 if (pci.pciDomain != 0xFFFFFFFFu && pci.pciBus <= 255 && pci.pciDevice <= 31 && pci.pciFunction <= 7) {
-                    return string.Format("{0:x4}:{1:x2}:{2:x2}.{3}", pci.pciDomain & 0xFFFF, pci.pciBus, pci.pciDevice, pci.pciFunction);
+                    pciBusId = string.Format("{0:x4}:{1:x2}:{2:x2}.{3}", pci.pciDomain & 0xFFFF, pci.pciBus, pci.pciDevice, pci.pciFunction);
                 }
+                byte[] idOut = new byte[64];
+                Marshal.Copy(pId, idOut, 0, 64);
+                uint luidValid = BitConverter.ToUInt32(idOut, 60);
+                if (luidValid != 0) luidStr = FormatLuidBytes(idOut, 48);
             } finally {
                 Marshal.FreeHGlobal(pProps2);
                 Marshal.FreeHGlobal(pPci);
+                Marshal.FreeHGlobal(pId);
             }
         } catch {}
-        return "";
     }
 
     static List<VkGpuInfo> EnumerateVkNvidiaDevices(IntPtr inst) {
@@ -576,6 +603,8 @@ class NvKeepAlive {
             }
             if (qFam == uint.MaxValue) continue;
 
+            string vkPci, vkLuid;
+            TryGetVkPciAndLuid(inst, pdevs[i], out vkPci, out vkLuid);
             list.Add(new VkGpuInfo {
                 PDev = pdevs[i],
                 Name = dName,
@@ -583,7 +612,8 @@ class NvKeepAlive {
                 DeviceId = deviceId,
                 VramMiB = vramBytes / (1024UL * 1024UL),
                 ComputeQueueFamily = qFam,
-                PciBusId = TryGetVkPciBusId(inst, pdevs[i])
+                PciBusId = vkPci,
+                Luid = vkLuid
             });
         }
         return list;
@@ -607,6 +637,15 @@ class NvKeepAlive {
         } catch { return ""; }
     }
 
+    static string GetCudaLuid(int dev) {
+        try {
+            byte[] buf = new byte[8];
+            uint mask;
+            if (cuDeviceGetLuid(buf, out mask, dev) != 0) return "";
+            return FormatLuidBytes(buf, 0);
+        } catch { return ""; }
+    }
+
     static List<CudaGpuInfo> EnumerateCudaDevices() {
         var list = new List<CudaGpuInfo>();
         try {
@@ -621,7 +660,8 @@ class NvKeepAlive {
                     CudaOrdinal = i,
                     Name = GetCudaDeviceName(d),
                     VramMiB = mb,
-                    PciBusId = GetCudaPciBusId(d)
+                    PciBusId = GetCudaPciBusId(d),
+                    Luid = GetCudaLuid(d)
                 });
             }
         } catch {}
@@ -637,6 +677,7 @@ class NvKeepAlive {
             foreach (var v in vkGpus) {
                 var cg = new CanonicalGpu {
                     PciBusId = v.PciBusId,
+                    Luid = v.Luid,
                     Name = v.Name,
                     DeviceId = v.DeviceId,
                     VramMiB = v.VramMiB,
@@ -662,6 +703,7 @@ class NvKeepAlive {
                         cg.Cuda = match;
                         usedCuda.Add(match.CudaOrdinal);
                         if (string.IsNullOrEmpty(cg.PciBusId)) cg.PciBusId = match.PciBusId;
+                        if (string.IsNullOrEmpty(cg.Luid)) cg.Luid = match.Luid;
                     }
                 }
                 list.Add(cg);
@@ -673,6 +715,7 @@ class NvKeepAlive {
                 if (usedCuda.Contains(c.CudaOrdinal)) continue;
                 list.Add(new CanonicalGpu {
                     PciBusId = c.PciBusId,
+                    Luid = c.Luid,
                     Name = c.Name,
                     DeviceId = 0,
                     VramMiB = c.VramMiB,
@@ -1339,7 +1382,7 @@ class NvKeepAlive {
         var gpus = ProbeAllGpus(out vkInst);
         try {
             foreach (var g in gpus) {
-                Console.WriteLine("{0}\t{1}\t{2}\t0x{3:X4}\t{4}\t{5}\t{6}\t{7}\t{8}",
+                Console.WriteLine("{0}\t{1}\t{2}\t0x{3:X4}\t{4}\t{5}\t{6}\t{7}\t{8}\t{9}",
                     g.Index,
                     string.IsNullOrEmpty(g.PciBusId) ? "-" : g.PciBusId,
                     g.Name.Replace('\t', ' '),
@@ -1348,7 +1391,8 @@ class NvKeepAlive {
                     g.IsMining ? 1 : 0,
                     g.IsCmp40hx ? 1 : 0,
                     g.Vk != null ? 1 : 0,
-                    g.Cuda != null ? 1 : 0);
+                    g.Cuda != null ? 1 : 0,
+                    string.IsNullOrEmpty(g.Luid) ? "-" : g.Luid);
             }
             return gpus.Count > 0 ? 0 : 1;
         } finally {

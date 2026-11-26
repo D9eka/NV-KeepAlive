@@ -8,7 +8,7 @@ First public release of **NV-KeepAlive** — a lightweight, zero-dependency back
   - **Vulkan Compute** (`~5-20 MiB VRAM` per GPU) via dynamic `vulkan-1.dll` / `libvulkan.so.1` and an embedded ~350-byte SPIR-V 1.0 kernel.
   - **CUDA Driver API** (`~200-300 MiB VRAM` per GPU) via dynamic `nvcuda.dll` / `libcuda.so.1` and an embedded PTX 6.0 (`sm_50+`) kernel.
 - **Native Windows 11 Fluent Dark GUI (`windows\NvKeepAliveUI.exe`, ~68 KB):**
-  - Built-in **EN / RU** language switch, live `nvidia-smi` telemetry (PCI Bus ID, PCIe link, VRAM, temperature, power), live daemon `CPU%`, and short-window `nvlddmkm` TDR counters (`5m` and `Since start`).
+  - Built-in **EN / RU** language switch, live `nvidia-smi` telemetry (PCI Bus ID, PCIe link, total VRAM, temperature, power), live **per-GPU daemon VRAM** (via Windows `GPU Process Memory` matched by `AdapterLuid`), live daemon `CPU%`, and short-window `nvlddmkm` TDR counters (`5m` and `Since start`).
   - Explicit per-GPU backend selection (`Vulkan | CUDA`, no silent fallback) with a built-in **Vulkan Runtime installation guide** dialog and live **Recheck** button if `vulkan-1.dll` or NVIDIA Vulkan ICD is missing.
   - Context-sensitive CMP controls (shown only when a CMP GPU is selected): **PCIe Gen2 Unlock Sync** (for `Cyridd/cmpunlocker` on CMP 40HX, including our built-in `--retrain-gen2` chipset-bridge fix and wake-from-sleep trigger) and **`GGML_VK_DISABLE_COOPMAT2`** toggle switch with a separate **Apply** button.
 - **Multi-GPU and per-GPU backend assignment:** run a single daemon across multiple NVIDIA GPUs sorted canonically by PCI Bus ID (e.g. `--targets 0:cuda,1:vulkan`), while ignoring AMD/Intel GPUs.
