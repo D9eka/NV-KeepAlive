@@ -47,7 +47,7 @@ namespace NvKeepAliveUI {
         const string TaskName = "NV-KeepAlive";
         const string Gen2TaskName = "40HX PCIe Gen2 Bring-up";
         const string MutexName = "Global\\NvKeepAliveMutex";
-        const string UnlockerUrl = "https://github.com/PZH1gdmu/CMP40HX-Unlock/releases";
+        const string UnlockerUrl = "https://github.com/Cyridd/cmpunlocker/releases";
         const string LunarGUrl = "https://vulkan.lunarg.com/sdk/home#windows";
         const string NvidiaDrvUrl = "https://www.nvidia.com/drivers";
 
@@ -1450,8 +1450,8 @@ namespace NvKeepAliveUI {
             sp.Children.Add(MakeCard(stDock, new Thickness(10, 8, 10, 8)));
 
             sp.Children.Add(new TextBlock {
-                Text = T("CMP40HX-Unlock - сторонний открытый проект (PZH1gdmu/CMP40HX-Unlock) для разблокировки полных вычислений FP16/Tensor Cores, Resizable BAR и переключения PCIe с Gen1 на Gen2 на NVIDIA CMP 40HX.",
-                         "CMP40HX-Unlock is an independent open-source project (PZH1gdmu/CMP40HX-Unlock) that unlocks full FP16/Tensor Core compute, Resizable BAR, and PCIe Gen2 speed on NVIDIA CMP 40HX cards."),
+                Text = T("CMP40HX-Unlock (Cyridd/cmpunlocker) - сторонний открытый проект для NVIDIA CMP 40HX (DEV=0x1F0B): разблокирует полные вычисления FP16/Tensor Cores, 8 GiB Resizable BAR и переключение PCIe с Gen1 на Gen2.",
+                         "CMP40HX-Unlock (Cyridd/cmpunlocker) is an independent open-source project for NVIDIA CMP 40HX (DEV=0x1F0B) that unlocks full FP16/Tensor Core compute, 8 GiB Resizable BAR, and PCIe Gen2 speed."),
                 Foreground = Br("#CCCCCC"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8)
             });
             sp.Children.Add(new TextBlock {

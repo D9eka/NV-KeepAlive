@@ -33,7 +33,7 @@ Lightweight, zero-dependency background daemon and Windows 11 Fluent GUI for Win
 VRAM-modded NVIDIA cards (for example, 16 GB CMP 40HX, 20 GB RTX 3080, or 22 GB RTX 2080 Ti) and certain mining GPUs run stable under load, but drop into deep low-voltage P-states (such as ~760 mV) when idle. Because aftermarket GDDR6 memory straps or VBIOS power tables are not calibrated for those low-voltage transitions:
 
 1. On patched drivers (`dartraiden/NVIDIA-patcher`), Windows triggers cyclic WDDM Timeout Detection and Recovery (`nvlddmkm Event ID 14` or `153`) roughly every 14-20 seconds during idle, causing UI stutters and invalidating active CUDA/Vulkan contexts.
-2. When compute/ReBAR unlock is active (such as `PZH1gdmu/CMP40HX-Unlock`), an idle TDR frequently escalates directly into a kernel stop error: `BSOD 0x0000010E` (`VIDEO_MEMORY_MANAGEMENT_INTERNAL`).
+2. When compute/ReBAR unlock is active (such as `Cyridd/cmpunlocker` for CMP 40HX), an idle TDR frequently escalates directly into a kernel stop error: `BSOD 0x0000010E` (`VIDEO_MEMORY_MANAGEMENT_INTERNAL`).
 3. A minimal continuous compute heartbeat keeps the GPU out of the unstable idle voltage state without holding significant VRAM or interfering with real workloads.
 
 ---
@@ -148,7 +148,7 @@ NvKeepAlive.exe --targets 0:cuda,1:vulkan --quiet --log "%ProgramData%\NV-KeepAl
 
 ## PCIe Gen2 Unlock Synchronization and Chipset Bridge Fix (CMP 40HX)
 
-`CMP40HX-Unlock` (`https://github.com/PZH1gdmu/CMP40HX-Unlock`) is an independent third-party project that unlocks full FP16/Tensor Cores, Resizable BAR, and PCIe Gen2 on `CMP 40HX`. NV-KeepAlive does **not** bundle any third-party unlocker binaries or drivers.
+`cmpunlocker` (`https://github.com/Cyridd/cmpunlocker`) is an independent third-party project specifically for `NVIDIA CMP 40HX` (`DEV=0x1F0B`) that unlocks full FP16/Tensor Cores, 8 GiB Resizable BAR, and PCIe Gen2. NV-KeepAlive does **not** bundle any third-party unlocker binaries or drivers.
 
 When a `CMP 40HX` (`DEV=0x1F0B`) is selected in `NvKeepAliveUI.exe`, the **PCIe Gen2 Unlock Sync** panel becomes visible (with a `?` button showing install status and opening the author's release page):
 
