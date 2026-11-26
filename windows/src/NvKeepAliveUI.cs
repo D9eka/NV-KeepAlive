@@ -103,7 +103,7 @@ namespace NvKeepAliveUI {
     }
 
     public class MainWindow : Window {
-        const string Version = "1.1.2";
+        const string Version = "1.1.3";
         const string TaskName = "NV-KeepAlive";
         const string Gen2TaskName = "40HX PCIe Gen2 Bring-up";
         const string MutexName = "Global\\NvKeepAliveMutex";
@@ -1404,8 +1404,8 @@ namespace NvKeepAliveUI {
             if (!show) return;
 
             _lblGen2Title.Text = T("Синхронизация с PCIe Gen2 Unlock", "PCIe Gen2 Unlock Sync");
-            _descGen2.Text = T("Паузит KeepAlive на время 40HXInstaller -gen2, чинит Gen2 на чипсетных/нижних слотах (PCIe Bridge Retrain) и восстанавливает Gen2 после сна.",
-                               "Pauses KeepAlive during 40HXInstaller -gen2, fixes Gen2 on chipset/secondary PCIe slots (Bridge Retrain), and restores Gen2 after sleep.");
+            _descGen2.Text = T("Чинит Gen2 на чипсетных/нижних слотах (PCIe Bridge Retrain), восстанавливает Gen2 после сна и держит KeepAlive активным при запуске 40HXInstaller -gen2.",
+                               "Fixes Gen2 on chipset/secondary PCIe slots (Bridge Retrain), restores Gen2 after sleep, and keeps KeepAlive active during 40HXInstaller -gen2.");
 
             if (_gen2State == "absent") {
                 _gen2Badge.Background = _pal.BtnSecBg; _gen2Badge.BorderBrush = _pal.BtnSecBorder; _gen2BadgeText.Foreground = _pal.FgSecondary;
@@ -1699,16 +1699,12 @@ namespace NvKeepAliveUI {
                     "@echo off\r\n" +
                     "setlocal\r\n" +
                     "set \"KA_DIR=" + InstallDir + "\"\r\n" +
-                    "set \"PAUSE_FILE=%KA_DIR%\\keepalive.pause\"\r\n" +
-                    "if exist \"%KA_DIR%\" type nul > \"%PAUSE_FILE%\"\r\n" +
-                    "timeout /t 2 /nobreak >nul\r\n" +
                     "if exist \"" + origExe + "\" (\r\n" +
                     "    \"" + origExe + "\" " + origArgs + "\r\n" +
                     ")\r\n" +
                     "if exist \"%KA_DIR%\\NvKeepAlive.exe\" (\r\n" +
                     "    \"%KA_DIR%\\NvKeepAlive.exe\" --retrain-gen2 --wait 20 --log \"%KA_DIR%\\keepalive.log\"\r\n" +
                     ")\r\n" +
-                    "if exist \"%PAUSE_FILE%\" del /F /Q \"%PAUSE_FILE%\" >nul 2>&1\r\n" +
                     "endlocal\r\n";
                 File.WriteAllText(Gen2WrapperPath, wrapper, Encoding.ASCII);
 
@@ -1908,8 +1904,8 @@ namespace NvKeepAliveUI {
                 Foreground = _pal.FgPrimary, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8)
             });
             sp.Children.Add(new TextBlock {
-                Text = T("Синхронизация в NV-KeepAlive выполняет 3 вещи: ставит KeepAlive на паузу во время запуска 40HXInstaller -gen2, запускает наш фикс чипсетного PCIe-моста (дожимает Gen1 -> Gen2 на нижних слотах, где 40HXInstaller не находит Root Port) и восстанавливает Gen2 после пробуждения из сна.",
-                         "NV-KeepAlive sync performs 3 steps: pauses KeepAlive while 40HXInstaller -gen2 runs, runs our built-in PCIe chipset-bridge retrain fix (lifts Gen1 -> Gen2 in secondary slots where 40HXInstaller misses the Root Port), and restores Gen2 after waking from sleep."),
+                Text = T("Синхронизация в NV-KeepAlive выполняет 3 вещи: запускает наш фикс чипсетного PCIe-моста после 40HXInstaller -gen2 (дожимает Gen1 -> Gen2 на нижних слотах, где анлокер не находит Root Port), держит KeepAlive активным для защиты EFI-анлока от сброса PnP и восстанавливает Gen2 после пробуждения из сна.",
+                         "NV-KeepAlive sync performs 3 steps: runs our built-in PCIe chipset-bridge retrain fix after 40HXInstaller -gen2 (lifts Gen1 -> Gen2 in secondary slots where the unlocker misses the Root Port), keeps KeepAlive active to shield EFI-unlocked cards from PnP resets, and restores Gen2 after waking from sleep."),
                 Foreground = _pal.FgSecondary, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 12)
             });
 

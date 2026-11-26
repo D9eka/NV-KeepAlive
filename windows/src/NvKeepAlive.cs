@@ -8,14 +8,14 @@ using System.Security;
 using System.Text;
 using System.Threading;
 
-// NV-KeepAlive v1.1.2 (Windows) - Minimalist, Zero-Dependency NVIDIA GPU KeepAlive
+// NV-KeepAlive v1.1.3 (Windows) - Minimalist, Zero-Dependency NVIDIA GPU KeepAlive
 // Backends (compiled into a single binary, zero SDK dependencies):
 //   1) Vulkan Compute (vulkan-1.dll + embedded SPIR-V 1.0) - ~5-20 MiB VRAM
 //   2) CUDA Driver API (nvcuda.dll + embedded PTX sm_50+)  - ~200-300 MiB VRAM
 // Supports per-GPU backend assignment (--targets 0:vulkan,1:cuda), NVML external-load yield,
 // graceful Windows shutdown handling, and built-in PCIe chipset-bridge Gen2 retrain (--retrain-gen2).
 class NvKeepAlive {
-    const string Version = "1.1.2";
+    const string Version = "1.1.3";
     const string MutexName = "Global\\NvKeepAliveMutex";
     const string RetrainMutexName = "Global\\NvKeepAliveGen2RetrainMutex";
     const long MaxLogBytes = 100 * 1024;
@@ -257,6 +257,7 @@ class NvKeepAlive {
     delegate bool ConsoleCtrlDelegate(uint ctrlType);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetConsoleCtrlHandler(ConsoleCtrlDelegate handler, bool add);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetProcessShutdownParameters(uint dwLevel, uint dwFlags);
+    [DllImport("kernel32.dll")] static extern ulong GetTickCount64();
     static ConsoleCtrlDelegate g_ctrlHandler = null;
     static readonly ManualResetEventSlim g_doneEvent = new ManualResetEventSlim(false);
     static Config g_activeCfg = null;
@@ -383,9 +384,33 @@ class NvKeepAlive {
         } catch { return false; }
     }
 
+    static void ClearStalePauseOnStartup(Config cfg) {
+        try {
+            if (string.IsNullOrEmpty(cfg.PauseFile) || !File.Exists(cfg.PauseFile)) return;
+            DateTime bootUtc = DateTime.UtcNow - TimeSpan.FromMilliseconds(GetTickCount64());
+            DateTime writeUtc = File.GetLastWriteTimeUtc(cfg.PauseFile);
+            if (writeUtc < bootUtc.AddSeconds(2)) {
+                File.Delete(cfg.PauseFile);
+                LogEvent(cfg, true, "Cleared stale pause file from previous boot.");
+            }
+        } catch {}
+    }
+
     static bool IsPaused(Config cfg) {
-        if (!string.IsNullOrEmpty(cfg.PauseFile) && File.Exists(cfg.PauseFile)) return true;
-        if (IsExternalUnlockerActive()) return true;
+        if (!string.IsNullOrEmpty(cfg.PauseFile) && File.Exists(cfg.PauseFile)) {
+            try {
+                string txt = File.ReadAllText(cfg.PauseFile).Trim();
+                if (txt.Equals("gen2-sync", StringComparison.OrdinalIgnoreCase) || txt.Equals("gen2-retrain", StringComparison.OrdinalIgnoreCase)) {
+                    double ageSec = (DateTime.UtcNow - File.GetLastWriteTimeUtc(cfg.PauseFile)).TotalSeconds;
+                    if (ageSec > 75 && !IsExternalUnlockerActive()) {
+                        File.Delete(cfg.PauseFile);
+                        LogEvent(cfg, true, "Cleared orphaned {0} pause file (age={1:F0}s).", txt, ageSec);
+                        return false;
+                    }
+                }
+            } catch {}
+            return true;
+        }
         return false;
     }
 
@@ -904,7 +929,7 @@ class NvKeepAlive {
                 IntPtr nvmlDev = IntPtr.Zero;
 
                 while (!g_stop && (cfg.RunSec == 0 || totalSw.Elapsed.TotalSeconds < cfg.RunSec)) {
-                    if (pauseCheckSw.ElapsedMilliseconds >= 1500) {
+                    if (pauseCheckSw.ElapsedMilliseconds >= 300) {
                         pauseCheckSw.Restart();
                         if (IsPaused(cfg)) break;
                     }
@@ -917,7 +942,7 @@ class NvKeepAlive {
                             LogEvent(cfg, false, "[GPU {0}] External load (mem={1}%, gpu={2}%) -> yielding completely", cgpu.Index, uMem, uGpu);
                             while (!g_stop && (cfg.RunSec == 0 || totalSw.Elapsed.TotalSeconds < cfg.RunSec)) {
                                 Thread.Sleep(250);
-                                if (pauseCheckSw.ElapsedMilliseconds >= 1500) {
+                                if (pauseCheckSw.ElapsedMilliseconds >= 300) {
                                     pauseCheckSw.Restart();
                                     if (IsPaused(cfg)) break;
                                 }
@@ -1050,7 +1075,7 @@ class NvKeepAlive {
                 IntPtr nvmlDev = IntPtr.Zero;
 
                 while (!g_stop && (cfg.RunSec == 0 || totalSw.Elapsed.TotalSeconds < cfg.RunSec)) {
-                    if (pauseCheckSw.ElapsedMilliseconds >= 1500) {
+                    if (pauseCheckSw.ElapsedMilliseconds >= 300) {
                         pauseCheckSw.Restart();
                         if (IsPaused(cfg)) break;
                     }
@@ -1063,7 +1088,7 @@ class NvKeepAlive {
                             LogEvent(cfg, false, "[GPU {0}] External load (mem={1}%, gpu={2}%) -> yielding completely", cgpu.Index, uMem, uGpu);
                             while (!g_stop && (cfg.RunSec == 0 || totalSw.Elapsed.TotalSeconds < cfg.RunSec)) {
                                 Thread.Sleep(250);
-                                if (pauseCheckSw.ElapsedMilliseconds >= 1500) {
+                                if (pauseCheckSw.ElapsedMilliseconds >= 300) {
                                     pauseCheckSw.Restart();
                                     if (IsPaused(cfg)) break;
                                 }
@@ -1221,6 +1246,7 @@ class NvKeepAlive {
         IntPtr _hScm = IntPtr.Zero, _hSvc = IntPtr.Zero;
         public IntPtr Handle = new IntPtr(-1);
         bool _createdSvc = false;
+        bool _startedSvc = false;
         public bool Open(string drvPath) {
             Handle = CreateFile(@"\\.\WinRing0_1_2_0", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
             if (Handle != new IntPtr(-1)) return true;
@@ -1233,15 +1259,21 @@ class NvKeepAlive {
                 if (_hSvc == IntPtr.Zero) return false;
                 _createdSvc = true;
             }
-            if (!StartService(_hSvc, 0, IntPtr.Zero) && Marshal.GetLastWin32Error() != 1056) return false;
+            if (StartService(_hSvc, 0, IntPtr.Zero)) {
+                _startedSvc = true;
+            } else if (Marshal.GetLastWin32Error() != 1056) {
+                return false;
+            }
             Handle = CreateFile(@"\\.\WinRing0_1_2_0", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
             return Handle != new IntPtr(-1);
         }
         public void Dispose() {
             if (Handle != new IntPtr(-1) && Handle != IntPtr.Zero) { CloseHandle(Handle); Handle = new IntPtr(-1); }
             if (_hSvc != IntPtr.Zero) {
-                SERVICE_STATUS ss; ControlService(_hSvc, SERVICE_CONTROL_STOP, out ss);
-                if (_createdSvc) DeleteService(_hSvc);
+                if (_startedSvc || _createdSvc) {
+                    SERVICE_STATUS ss; ControlService(_hSvc, SERVICE_CONTROL_STOP, out ss);
+                    if (_createdSvc) DeleteService(_hSvc);
+                }
                 CloseServiceHandle(_hSvc); _hSvc = IntPtr.Zero;
             }
             if (_hScm != IntPtr.Zero) { CloseServiceHandle(_hScm); _hScm = IntPtr.Zero; }
@@ -1300,6 +1332,10 @@ class NvKeepAlive {
                 bool anyPending = false;
                 using (var wr = new WinRing0Session()) {
                     if (!wr.Open(cfg.DriverPath)) {
+                        if (!cfg.DryRun && sw.Elapsed.TotalSeconds < cfg.RetrainWaitSec) {
+                            Thread.Sleep(400);
+                            continue;
+                        }
                         LogEvent(cfg, true, "[Gen2-Retrain] Cannot open WinRing0 driver (Administrator/SYSTEM privileges required).");
                         return 3;
                     }
@@ -1327,33 +1363,20 @@ class NvKeepAlive {
                             continue;
                         }
                         if (gi.MaxSpd >= 2 && bi.MaxSpd >= 2) {
-                            bool createdPause = false;
-                            string pausePath = !string.IsNullOrEmpty(cfg.PauseFile) ? cfg.PauseFile :
-                                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"NV-KeepAlive\keepalive.pause");
-                            try {
-                                string pDir = Path.GetDirectoryName(pausePath);
-                                if (!string.IsNullOrEmpty(pDir) && Directory.Exists(pDir) && !File.Exists(pausePath)) {
-                                    File.WriteAllText(pausePath, "gen2-retrain");
-                                    createdPause = true;
-                                    Thread.Sleep(400);
-                                }
-                                if (gi.Tls != 2) WritePciWord(wr.Handle, p.gB, p.gD, p.gF, gCap + 0x30, (ushort)((gi.LnkCtl2 & 0xFFF0) | 2));
-                                WritePciWord(wr.Handle, p.bB, p.bD, p.bF, bCap + 0x30, (ushort)((bi.LnkCtl2 & 0xFFF0) | 2));
-                                WritePciWord(wr.Handle, p.bB, p.bD, p.bF, bCap + 0x10, (ushort)(bi.LnkCtl | 0x0020));
-                                for (int t = 0; t < 40; t++) {
-                                    Thread.Sleep(25);
-                                    ushort st;
-                                    if (ReadPciWord(wr.Handle, p.bB, p.bD, p.bF, bCap + 0x12, out st) && (st & 0x0800) == 0) break;
-                                }
-                                Thread.Sleep(100);
-                                var ga = ReadLinkInfo(wr.Handle, p.gB, p.gD, p.gF, gCap);
-                                var ba = ReadLinkInfo(wr.Handle, p.bB, p.bD, p.bF, bCap);
-                                LogEvent(cfg, true, "[Gen2-Retrain] Retrained {0:X2}:{1:X2}.{2} <-> Bridge {3:X2}:{4:X2}.{5} ({6:X4}:{7:X4}): Gen{8} x{9} -> Gen{10} x{11} (Bridge Gen{12} x{13})",
-                                    p.gB, p.gD, p.gF, p.bB, p.bD, p.bF, p.bVidDid & 0xFFFF, (p.bVidDid >> 16) & 0xFFFF,
-                                    gi.CurSpd, gi.CurWid, ga.CurSpd, ga.CurWid, ba.CurSpd, ba.CurWid);
-                            } finally {
-                                if (createdPause) { try { if (File.Exists(pausePath)) File.Delete(pausePath); } catch {} }
+                            if (gi.Tls != 2) WritePciWord(wr.Handle, p.gB, p.gD, p.gF, gCap + 0x30, (ushort)((gi.LnkCtl2 & 0xFFF0) | 2));
+                            WritePciWord(wr.Handle, p.bB, p.bD, p.bF, bCap + 0x30, (ushort)((bi.LnkCtl2 & 0xFFF0) | 2));
+                            WritePciWord(wr.Handle, p.bB, p.bD, p.bF, bCap + 0x10, (ushort)(bi.LnkCtl | 0x0020));
+                            for (int t = 0; t < 40; t++) {
+                                Thread.Sleep(25);
+                                ushort st;
+                                if (ReadPciWord(wr.Handle, p.bB, p.bD, p.bF, bCap + 0x12, out st) && (st & 0x0800) == 0) break;
                             }
+                            Thread.Sleep(100);
+                            var ga = ReadLinkInfo(wr.Handle, p.gB, p.gD, p.gF, gCap);
+                            var ba = ReadLinkInfo(wr.Handle, p.bB, p.bD, p.bF, bCap);
+                            LogEvent(cfg, true, "[Gen2-Retrain] Retrained {0:X2}:{1:X2}.{2} <-> Bridge {3:X2}:{4:X2}.{5} ({6:X4}:{7:X4}): Gen{8} x{9} -> Gen{10} x{11} (Bridge Gen{12} x{13})",
+                                p.gB, p.gD, p.gF, p.bB, p.bD, p.bF, p.bVidDid & 0xFFFF, (p.bVidDid >> 16) & 0xFFFF,
+                                gi.CurSpd, gi.CurWid, ga.CurSpd, ga.CurWid, ba.CurSpd, ba.CurWid);
                         } else {
                             anyPending = true;
                         }
@@ -1364,7 +1387,7 @@ class NvKeepAlive {
                     LogEvent(cfg, true, "[Gen2-Retrain] GPU still reports max=Gen1 after {0}s (40HXInstaller -gen2 has not unlocked link capability yet).", cfg.RetrainWaitSec);
                     return 0;
                 }
-                Thread.Sleep(1500);
+                Thread.Sleep(400);
             }
         }
     }
@@ -1607,7 +1630,7 @@ class NvKeepAlive {
 
         g_activeCfg = cfg;
         Console.CancelKeyPress += (s, e) => { e.Cancel = true; g_shutdown = true; g_stop = true; g_needRestart = false; };
-        try { SetProcessShutdownParameters(0x3FF, 0); } catch {}
+        try { SetProcessShutdownParameters(0x100, 0); } catch {}
         g_ctrlHandler = (uint ctrlType) => {
             if (ctrlType == 5) return true; // CTRL_LOGOFF_EVENT: stay alive as SYSTEM service
             if (!g_shutdown) {
@@ -1639,6 +1662,7 @@ class NvKeepAlive {
             }
         }
 
+        ClearStalePauseOnStartup(cfg);
         InitNvmlOnce();
         IntPtr vkInst = IntPtr.Zero;
         try {
