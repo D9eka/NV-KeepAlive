@@ -19,23 +19,20 @@ First public release of **NV-KeepAlive** — a lightweight, zero-dependency back
 ### Quick Start
 
 **Windows 10 / 11:**
-1. Download `NV-KeepAlive-v1.0.0.zip`, verify its SHA-256 against `SHA256SUMS.txt`, and extract the archive.
-2. Double-click `windows\NvKeepAliveUI.exe` (approve UAC prompt).
+1. Download `NV-KeepAlive-Windows-v1.0.0.zip`, verify its SHA-256 against `SHA256SUMS.txt`, and extract the archive.
+2. Double-click `NvKeepAliveUI.exe` (approve UAC prompt).
 3. Select the desired GPU(s) and backend (`Vulkan` recommended, or `CUDA`), then click **Install**.
 4. Click **Test 25s** to verify 0 `nvlddmkm` errors over 25 seconds.
 
 **Linux (Ubuntu / Debian / Arch / Fedora):**
 ```bash
-unzip NV-KeepAlive-v1.0.0.zip -d NV-KeepAlive
-cd NV-KeepAlive/linux
+mkdir -p NV-KeepAlive && tar -xzf NV-KeepAlive-Linux-v1.0.0.tar.gz -C NV-KeepAlive
+cd NV-KeepAlive
 sudo bash install-linux.sh
 ```
 
-### Package Contents
+### Release Packages
 
-- `windows/NvKeepAliveUI.exe` — Windows 11 Fluent Dark WPF manager (~68 KB, zero external dependencies)
-- `windows/NvKeepAlive.exe` — Windows Session 0 / `SYSTEM` keepalive daemon (~65 KB)
-- `windows/src/` — C# source code, build script (`build-windows.bat`), and manual `safe-gen2-wrapper.bat`
-- `linux/bin/nv-keepalive-linux-x86_64` — prebuilt Linux x86_64 binary
-- `linux/` — C source (`nv_keepalive.c`), `Makefile`, `nv-keepalive.service`, `install-linux.sh`, `uninstall-linux.sh`
-- `README.md` / `README.ru.md` — full English and Russian technical documentation (including comparison with EVGA Precision X1 / MSI Afterburner voltage lock)
+- **`NV-KeepAlive-Windows-v1.0.0.zip`** — ready-to-run Windows package (`NvKeepAliveUI.exe`, `NvKeepAlive.exe`, `README.md`, `README.ru.md`, `LICENSE`)
+- **`NV-KeepAlive-Linux-v1.0.0.tar.gz`** — ready-to-run Linux package (`bin/nv-keepalive-linux-x86_64`, `install-linux.sh`, `uninstall-linux.sh`, `nv-keepalive.service`, `nv_keepalive.c`, `Makefile`, docs)
+- **`SHA256SUMS.txt`** — SHA-256 checksums for both release archives

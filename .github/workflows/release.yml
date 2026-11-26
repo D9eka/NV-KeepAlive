@@ -54,22 +54,47 @@ jobs:
         with:
           name: windows-bins
           path: windows
-      - name: Create release archive
+      - name: Create clean per-OS release archives
         run: |
           chmod +x linux/bin/nv-keepalive-linux-x86_64 linux/install-linux.sh linux/uninstall-linux.sh
           TAG="${GITHUB_REF_NAME}"
           if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then TAG="dev-${GITHUB_SHA::7}"; fi
-          ARCHIVE="NV-KeepAlive-${TAG}.zip"
-          zip -r "${ARCHIVE}" README.md README.ru.md LICENSE src windows linux -x "*.git*"
-          sha256sum "${ARCHIVE}" windows/NvKeepAlive.exe windows/NvKeepAliveUI.exe linux/bin/nv-keepalive-linux-x86_64 > SHA256SUMS.txt
+
+          WIN_ARCHIVE="NV-KeepAlive-Windows-${TAG}.zip"
+          LIN_ARCHIVE="NV-KeepAlive-Linux-${TAG}.tar.gz"
+
+          rm -rf dist_win dist_lin
+          mkdir -p dist_win dist_lin/bin
+
+          # Windows release: ready-to-run executables right in the root folder
+          cp windows/NvKeepAliveUI.exe windows/NvKeepAlive.exe README.md README.ru.md LICENSE dist_win/
+          (cd dist_win && zip -r "../${WIN_ARCHIVE}" .)
+
+          # Linux release: prebuilt binary + installer + service + C fallback source
+          cp linux/bin/nv-keepalive-linux-x86_64 dist_lin/bin/
+          cp linux/install-linux.sh linux/uninstall-linux.sh linux/nv-keepalive.service linux/nv_keepalive.c linux/Makefile README.md README.ru.md LICENSE dist_lin/
+          chmod +x dist_lin/bin/nv-keepalive-linux-x86_64 dist_lin/install-linux.sh dist_lin/uninstall-linux.sh
+          tar -czf "${LIN_ARCHIVE}" -C dist_lin .
+
+          sha256sum "${WIN_ARCHIVE}" "${LIN_ARCHIVE}" > SHA256SUMS.txt
           cat SHA256SUMS.txt
-          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+          echo "WIN_ARCHIVE=${WIN_ARCHIVE}" >> "$GITHUB_ENV"
+          echo "LIN_ARCHIVE=${LIN_ARCHIVE}" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@v4
         with:
-          name: release-zip
+          name: release-packages
           path: |
-            ${{ env.ARCHIVE }}
+            ${{ env.WIN_ARCHIVE }}
+            ${{ env.LIN_ARCHIVE }}
             SHA256SUMS.txt
+      - name: Clean obsolete release assets (if re-tagging)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release delete-asset "${GITHUB_REF_NAME}" "NV-KeepAlive-${GITHUB_REF_NAME}.zip" -y 2>/dev/null || true
+          fi
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
@@ -77,5 +102,6 @@ jobs:
           name: NV-KeepAlive ${{ github.ref_name }}
           body_path: RELEASE_NOTES.md
           files: |
-            ${{ env.ARCHIVE }}
+            ${{ env.WIN_ARCHIVE }}
+            ${{ env.LIN_ARCHIVE }}
             SHA256SUMS.txt

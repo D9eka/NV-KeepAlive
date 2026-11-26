@@ -88,8 +88,8 @@ Hardware tested: `NVIDIA CMP 40HX 16GB` (EFI-unlocked, driver `581.94`, Ryzen 5 
 
 ## Windows Installation and GUI
 
-1. Download and extract the release ZIP archive (`NV-KeepAlive-v1.0.0.zip`).
-2. Double-click **`windows\NvKeepAliveUI.exe`** (~68 KB native WPF Windows 11 Fluent Dark manager, zero external runtime dependencies).
+1. Download and extract **`NV-KeepAlive-Windows-v1.0.0.zip`** from the Releases page.
+2. Double-click **`NvKeepAliveUI.exe`** (~68 KB native WPF Windows 11 Fluent Dark manager, zero external runtime dependencies).
 3. In the window:
    - Toggle language between **RU** and **EN** in the top-right corner (auto-detected from Windows locale on startup).
    - Review detected NVIDIA GPUs and live telemetry (`PCI Bus ID`, `PCIe link`, `VRAM`, temperature, power, live daemon `CPU%`, `TDR (5m)` and `Since start`).
