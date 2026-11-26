@@ -61,14 +61,21 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then TAG="dev-${GITHUB_SHA::7}"; fi
           ARCHIVE="NV-KeepAlive-${TAG}.zip"
           zip -r "${ARCHIVE}" README.md README.ru.md LICENSE src windows linux -x "*.git*"
+          sha256sum "${ARCHIVE}" windows/NvKeepAlive.exe windows/NvKeepAliveUI.exe linux/bin/nv-keepalive-linux-x86_64 > SHA256SUMS.txt
+          cat SHA256SUMS.txt
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@v4
         with:
           name: release-zip
-          path: ${{ env.ARCHIVE }}
+          path: |
+            ${{ env.ARCHIVE }}
+            SHA256SUMS.txt
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.ARCHIVE }}
-          generate_release_notes: true
+          name: NV-KeepAlive ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          files: |
+            ${{ env.ARCHIVE }}
+            SHA256SUMS.txt
