@@ -103,7 +103,7 @@ namespace NvKeepAliveUI {
     }
 
     public class MainWindow : Window {
-        const string Version = "1.1.1";
+        const string Version = "1.1.2";
         const string TaskName = "NV-KeepAlive";
         const string Gen2TaskName = "40HX PCIe Gen2 Bring-up";
         const string MutexName = "Global\\NvKeepAliveMutex";
@@ -973,7 +973,8 @@ namespace NvKeepAliveUI {
             string xmlOut;
             int rc = RunProcessCapture("schtasks.exe", "/Query /TN \"" + Gen2TaskName + "\" /XML", 4000, out xmlOut);
             if (rc != 0 || string.IsNullOrEmpty(xmlOut)) { _gen2State = "absent"; return; }
-            _gen2State = (xmlOut.IndexOf("gen2-sync-wrapper.cmd", StringComparison.OrdinalIgnoreCase) >= 0) ? "synced" : "unsynced";
+            bool pointsToWrapper = (xmlOut.IndexOf("gen2-sync-wrapper.cmd", StringComparison.OrdinalIgnoreCase) >= 0);
+            _gen2State = (pointsToWrapper && File.Exists(Gen2WrapperPath)) ? "synced" : "unsynced";
         }
 
         void DisposeVramCounters() {
@@ -1496,9 +1497,10 @@ namespace NvKeepAliveUI {
                     "$act = New-ScheduledTaskAction -Execute '" + InstalledExe.Replace("'", "''") + "' -Argument '" + args.Replace("'", "''") + "' -WorkingDirectory '" + InstallDir.Replace("'", "''") + "';" +
                     "$t1 = New-ScheduledTaskTrigger -AtStartup;" +
                     "$t2 = New-ScheduledTaskTrigger -AtLogOn;" +
+                    "$t3 = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1);" +
                     "$pr = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest;" +
                     "$st = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Days 0) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1);" +
-                    "Register-ScheduledTask -TaskName '" + TaskName + "' -Action $act -Trigger @($t1,$t2) -Principal $pr -Settings $st -Force | Out-Null;" +
+                    "Register-ScheduledTask -TaskName '" + TaskName + "' -Action $act -Trigger @($t1,$t2,$t3) -Principal $pr -Settings $st -Force | Out-Null;" +
                     "Start-ScheduledTask -TaskName '" + TaskName + "';";
 
                 string psOut;
@@ -1662,8 +1664,36 @@ namespace NvKeepAliveUI {
                 string origExe = WebUtility.HtmlDecode(mCmd.Groups[1].Value).Trim().Trim('"');
                 string origArgs = mArg.Success ? WebUtility.HtmlDecode(mArg.Groups[1].Value).Trim() : "-gen2 -silent";
 
-                if (!File.Exists(Gen2OrigXmlPath)) File.WriteAllText(Gen2OrigXmlPath, xmlOut, Encoding.Unicode);
-                File.WriteAllText(Gen2OrigCmdPath, origExe + Environment.NewLine + origArgs, Encoding.UTF8);
+                if (origArgs.IndexOf("gen2-sync-wrapper.cmd", StringComparison.OrdinalIgnoreCase) >= 0) {
+                    string recovered = null;
+                    if (File.Exists(Gen2OrigCmdPath)) {
+                        string[] lines = File.ReadAllLines(Gen2OrigCmdPath, Encoding.UTF8);
+                        if (lines.Length >= 1 && File.Exists(lines[0].Trim())) {
+                            recovered = lines[0].Trim();
+                            if (lines.Length >= 2) origArgs = lines[1].Trim();
+                        }
+                    }
+                    if (string.IsNullOrEmpty(recovered)) {
+                        string[] roots = new[] {
+                            Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                            System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"),
+                            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData)
+                        };
+                        foreach (string r in roots) {
+                            if (!Directory.Exists(r)) continue;
+                            try {
+                                string[] hits = Directory.GetFiles(r, "40HXInstaller.exe", SearchOption.AllDirectories);
+                                if (hits.Length > 0) { recovered = hits[0]; origArgs = "-gen2 -silent"; break; }
+                            } catch {}
+                        }
+                    }
+                    if (string.IsNullOrEmpty(recovered))
+                        throw new Exception("gen2-sync-wrapper.cmd is missing and 40HXInstaller.exe could not be located automatically.");
+                    origExe = recovered;
+                } else {
+                    if (!File.Exists(Gen2OrigXmlPath)) File.WriteAllText(Gen2OrigXmlPath, xmlOut, Encoding.Unicode);
+                    File.WriteAllText(Gen2OrigCmdPath, origExe + Environment.NewLine + origArgs, Encoding.UTF8);
+                }
 
                 string wrapper =
                     "@echo off\r\n" +
@@ -1686,12 +1716,13 @@ namespace NvKeepAliveUI {
                     "$ErrorActionPreference='Stop';" +
                     "$t = Get-ScheduledTask -TaskName '" + Gen2TaskName + "';" +
                     "$act = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c \"" + Gen2WrapperPath.Replace("'", "''") + "\"' -WorkingDirectory '" + InstallDir.Replace("'", "''") + "';" +
-                    "$cim = Get-CimClass -ClassName MSFT_TaskEventTrigger -Namespace Root/Microsoft/Windows/TaskScheduler;" +
-                    "$wake = New-CimInstance -CimClass $cim -ClientOnly;" +
-                    "$wake.Enabled = $true;" +
-                    "$wake.Delay = 'PT5S';" +
-                    "$wake.Subscription = '<QueryList><Query Id=\"0\" Path=\"System\"><Select Path=\"System\">*[System[Provider[@Name=''Microsoft-Windows-Power-Troubleshooter''] and EventID=1]]</Select></Query></QueryList>';" +
-                    "$trigs = @($t.Triggers) + @($wake);" +
+                    "$hasWake = $false; foreach ($tr in $t.Triggers) { if ($tr.Subscription -and $tr.Subscription -match 'Power-Troubleshooter') { $hasWake = $true } };" +
+                    "if ($hasWake) { $trigs = @($t.Triggers) } else {" +
+                    "  $cim = Get-CimClass -ClassName MSFT_TaskEventTrigger -Namespace Root/Microsoft/Windows/TaskScheduler;" +
+                    "  $wake = New-CimInstance -CimClass $cim -ClientOnly; $wake.Enabled = $true; $wake.Delay = 'PT5S';" +
+                    "  $wake.Subscription = '<QueryList><Query Id=\"0\" Path=\"System\"><Select Path=\"System\">*[System[Provider[@Name=''Microsoft-Windows-Power-Troubleshooter''] and EventID=1]]</Select></Query></QueryList>';" +
+                    "  $trigs = @($t.Triggers) + @($wake);" +
+                    "};" +
                     "Set-ScheduledTask -TaskName '" + Gen2TaskName + "' -Action $act -Trigger $trigs | Out-Null;";
 
                 string psOut;

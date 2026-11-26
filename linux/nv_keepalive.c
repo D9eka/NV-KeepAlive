@@ -28,7 +28,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define NVK_VERSION "1.1.1"
+#define NVK_VERSION "1.1.2"
 
 /* ===================== CUDA Driver API types ===================== */
 typedef int CUresult;
@@ -361,11 +361,13 @@ static int try_nvml_get_util(int nv_idx, const char *pci_bus_id, void **dev_hand
 }
 
 static volatile sig_atomic_t g_stop = 0;
+static volatile sig_atomic_t g_shutdown = 0;
 static volatile sig_atomic_t g_need_restart = 0;
 static pthread_mutex_t g_log_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void on_signal(int sig) {
     (void)sig;
+    g_shutdown = 1;
     g_stop = 1;
     g_need_restart = 0;
 }
@@ -812,7 +814,6 @@ static void *vulkan_worker(void *arg_ptr) {
     worker_arg_t *wa = (worker_arg_t *)arg_ptr;
     const config_t *cfg = wa->cfg;
     canonical_gpu_t cgpu = wa->gpu;
-    vk_gpu_t gpu = cgpu.vk_gpu;
 
     uint32_t spirv[512];
     size_t spv_words = build_spirv(spirv, cfg->threads, wa->iters);
@@ -828,9 +829,11 @@ static void *vulkan_worker(void *arg_ptr) {
             }
             if (g_stop) break;
             log_event(cfg, 1, "[GPU %d] Pause cleared, resuming.", cgpu.index);
+            sleep_ms(500);
             continue;
         }
 
+        VkInstance local_inst = NULL;
         VkDevice dev = NULL; VkBuffer buf = 0; VkDeviceMemory mem = 0;
         VkDescriptorSetLayout dsl = 0; VkPipelineLayout pl = 0;
         VkShaderModule sm = 0; VkPipeline pipe = 0;
@@ -838,6 +841,26 @@ static void *vulkan_worker(void *arg_ptr) {
         VkCommandPool cp = 0; VkCommandBuffer cb = NULL;
         VkFence fence = 0; VkQueue queue = NULL;
         VkResult rc = 0;
+        vk_gpu_t gpu = cgpu.vk_gpu;
+
+        local_inst = create_vk_instance();
+        if (!local_inst) { rc = -1; goto vk_err; }
+        vk_gpu_t fresh[64];
+        int nf = enum_vk_nvidia(local_inst, fresh, 64);
+        if (nf <= 0) { rc = -2; goto vk_err; }
+        int matched = -1;
+        if (cgpu.pci_bus_id[0]) {
+            for (int i = 0; i < nf; i++) {
+                if (strcasecmp(fresh[i].pci_bus_id, cgpu.pci_bus_id) == 0) { matched = i; break; }
+            }
+        }
+        if (matched < 0 && cgpu.device_id != 0) {
+            for (int i = 0; i < nf; i++) {
+                if (fresh[i].device_id == cgpu.device_id) { matched = i; break; }
+            }
+        }
+        if (matched < 0) matched = (cgpu.index >= 0 && cgpu.index < nf) ? cgpu.index : 0;
+        gpu = fresh[matched];
 
         float prio = 1.0f;
         VkDeviceQueueCreateInfo qci = { 2, NULL, 0, gpu.qfam, 1, &prio };
@@ -990,6 +1013,7 @@ static void *vulkan_worker(void *arg_ptr) {
             if (mem)   vk.free_mem(dev, mem, NULL);
             vk.destroy_dev(dev, NULL);
         }
+        if (local_inst) vk.destroy_inst(local_inst, NULL);
         if (rc != 0 && !g_stop) sleep_ms(1500);
     }
 
@@ -1375,6 +1399,7 @@ int main(int argc, char **argv) {
         }
 
         if (n_work > 0) {
+            if (vk_inst) { vk.destroy_inst(vk_inst, NULL); vk_inst = NULL; }
             log_event(&cfg, 1, "NV-KeepAlive v%s started: workers=%d blocks=%u threads=%u yield=%dms",
                       NVK_VERSION, n_work, cfg.blocks, cfg.threads, cfg.yield_ms);
             if (n_work == 1) {
@@ -1399,7 +1424,7 @@ int main(int argc, char **argv) {
     if (cu.lib) dlclose(cu.lib);
     if (vk.lib) dlclose(vk.lib);
 
-    if (g_need_restart && !g_stop) {
+    if (g_need_restart && !g_shutdown) {
         sleep_ms(1500);
         execv("/proc/self/exe", argv);
     }

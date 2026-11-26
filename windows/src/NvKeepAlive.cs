@@ -2,18 +2,20 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
+using System.Security;
 using System.Text;
 using System.Threading;
 
-// NV-KeepAlive v1.0.0 (Windows) - Minimalist, Zero-Dependency NVIDIA GPU KeepAlive
+// NV-KeepAlive v1.1.2 (Windows) - Minimalist, Zero-Dependency NVIDIA GPU KeepAlive
 // Backends (compiled into a single binary, zero SDK dependencies):
 //   1) Vulkan Compute (vulkan-1.dll + embedded SPIR-V 1.0) - ~5-20 MiB VRAM
 //   2) CUDA Driver API (nvcuda.dll + embedded PTX sm_50+)  - ~200-300 MiB VRAM
 // Supports per-GPU backend assignment (--targets 0:vulkan,1:cuda), NVML external-load yield,
 // graceful Windows shutdown handling, and built-in PCIe chipset-bridge Gen2 retrain (--retrain-gen2).
 class NvKeepAlive {
-    const string Version = "1.1.1";
+    const string Version = "1.1.2";
     const string MutexName = "Global\\NvKeepAliveMutex";
     const string RetrainMutexName = "Global\\NvKeepAliveGen2RetrainMutex";
     const long MaxLogBytes = 100 * 1024;
@@ -260,6 +262,7 @@ class NvKeepAlive {
     static Config g_activeCfg = null;
 
     static volatile bool g_stop = false;
+    static volatile bool g_shutdown = false;
     static volatile bool g_needRestart = false;
     static readonly object g_logLock = new object();
 
@@ -742,8 +745,9 @@ class NvKeepAlive {
     }
 
     // ===================== Workers (Vulkan & CUDA) =====================
+    [HandleProcessCorruptedStateExceptions]
+    [SecurityCritical]
     static void RunVulkanWorker(CanonicalGpu cgpu, Config cfg, uint iters, Stopwatch totalSw) {
-        VkGpuInfo gpu = cgpu.Vk;
         long launches = 0, yields = 0;
         int recoveries = 0, consecutiveFailures = 0;
         uint[] spirv = BuildSpirv(cfg.Threads, iters);
@@ -756,12 +760,34 @@ class NvKeepAlive {
                 }
                 if (g_stop || (cfg.RunSec > 0 && totalSw.Elapsed.TotalSeconds >= cfg.RunSec)) break;
                 LogEvent(cfg, true, "[GPU {0}] Pause cleared, resuming.", cgpu.Index);
+                Thread.Sleep(800);
+                if (g_stop || IsPaused(cfg)) continue;
             }
 
+            IntPtr localInst = IntPtr.Zero;
             IntPtr dev = IntPtr.Zero;
             ulong buf = 0, mem = 0, dsl = 0, pl = 0, sm = 0, pipe = 0, dp = 0, ds = 0, cp = 0, fence = 0;
             GCHandle hCb = default(GCHandle);
             try {
+                // Always create a fresh VkInstance & re-enumerate VkPhysicalDevice per cycle
+                // so a PCIe Gen2 reset (40HXInstaller) or WDDM TDR never leaves a stale PDev pointer.
+                localInst = CreateVkInstance();
+                if (localInst == IntPtr.Zero) throw new Exception("vkCreateInstance failed");
+                var freshGpus = EnumerateVkNvidiaDevices(localInst);
+                if (freshGpus == null || freshGpus.Count == 0) throw new Exception("No NVIDIA Vulkan GPU after reset");
+                VkGpuInfo gpu = null;
+                if (!string.IsNullOrEmpty(cgpu.PciBusId)) {
+                    foreach (var fg in freshGpus) {
+                        if (string.Equals(fg.PciBusId, cgpu.PciBusId, StringComparison.OrdinalIgnoreCase)) { gpu = fg; break; }
+                    }
+                }
+                if (gpu == null && cgpu.DeviceId != 0) {
+                    foreach (var fg in freshGpus) {
+                        if (fg.DeviceId == cgpu.DeviceId) { gpu = fg; break; }
+                    }
+                }
+                if (gpu == null) gpu = (cgpu.Index >= 0 && cgpu.Index < freshGpus.Count) ? freshGpus[cgpu.Index] : freshGpus[0];
+
                 float[] prio = new float[] { 1.0f };
                 GCHandle hPrio = GCHandle.Alloc(prio, GCHandleType.Pinned);
                 var qci = new VkDeviceQueueCreateInfo {
@@ -771,8 +797,12 @@ class NvKeepAlive {
                 IntPtr pQci = Marshal.AllocHGlobal(Marshal.SizeOf(qci));
                 Marshal.StructureToPtr(qci, pQci, false);
                 var dci = new VkDeviceCreateInfo { sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, queueCreateInfoCount = 1, pQueueCreateInfos = pQci };
-                int rc = vkCreateDevice(gpu.PDev, ref dci, IntPtr.Zero, out dev);
-                Marshal.FreeHGlobal(pQci); hPrio.Free();
+                int rc;
+                try {
+                    rc = vkCreateDevice(gpu.PDev, ref dci, IntPtr.Zero, out dev);
+                } finally {
+                    Marshal.FreeHGlobal(pQci); hPrio.Free();
+                }
                 if (rc != 0) throw new Exception("vkCreateDevice=" + rc);
 
                 IntPtr queue;
@@ -937,8 +967,9 @@ class NvKeepAlive {
             } catch (Exception ex) {
                 recoveries++;
                 consecutiveFailures++;
+                bool fatalFault = (ex is AccessViolationException);
                 LogEvent(cfg, true, "[GPU {0}] Vulkan recovering (#{1}): {2}", cgpu.Index, recoveries, ex.Message);
-                if (consecutiveFailures >= 3 && cfg.RunSec == 0) {
+                if ((fatalFault || consecutiveFailures >= 3) && cfg.RunSec == 0) {
                     LogEvent(cfg, true, "[GPU {0}] Vulkan handle lost after TDR/reset ({1}) - restarting fresh process...", cgpu.Index, ex.Message);
                     g_needRestart = true;
                     g_stop = true;
@@ -960,6 +991,9 @@ class NvKeepAlive {
                     try { if (mem != 0) vkFreeMemory(dev, mem, IntPtr.Zero); } catch {}
                     try { vkDestroyDevice(dev, IntPtr.Zero); } catch {}
                 }
+                if (localInst != IntPtr.Zero) {
+                    try { vkDestroyInstance(localInst, IntPtr.Zero); } catch {}
+                }
             }
         }
 
@@ -967,6 +1001,8 @@ class NvKeepAlive {
             cgpu.Index, launches, yields, recoveries, totalSw.Elapsed.TotalSeconds);
     }
 
+    [HandleProcessCorruptedStateExceptions]
+    [SecurityCritical]
     static void RunCudaWorker(CanonicalGpu cgpu, Config cfg, uint iters, byte[] ptxBytes, Stopwatch totalSw) {
         int ordinal = cgpu.Cuda.CudaOrdinal;
         long launches = 0, yields = 0;
@@ -1078,8 +1114,9 @@ class NvKeepAlive {
             } catch (Exception ex) {
                 recoveries++;
                 consecutiveFailures++;
+                bool fatalFault = (ex is AccessViolationException);
                 LogEvent(cfg, true, "[GPU {0}] CUDA recovering (#{1}): {2}", cgpu.Index, recoveries, ex.Message);
-                if (consecutiveFailures >= 3 && cfg.RunSec == 0) {
+                if ((fatalFault || consecutiveFailures >= 3) && cfg.RunSec == 0) {
                     LogEvent(cfg, true, "[GPU {0}] CUDA driver handle poisoned after TDR/reset ({1}) - restarting fresh process...", cgpu.Index, ex.Message);
                     g_needRestart = true;
                     g_stop = true;
@@ -1569,11 +1606,12 @@ class NvKeepAlive {
         if (cfg.RetrainGen2) return RunRetrainGen2(cfg);
 
         g_activeCfg = cfg;
-        Console.CancelKeyPress += (s, e) => { e.Cancel = true; g_stop = true; };
+        Console.CancelKeyPress += (s, e) => { e.Cancel = true; g_shutdown = true; g_stop = true; g_needRestart = false; };
         try { SetProcessShutdownParameters(0x3FF, 0); } catch {}
         g_ctrlHandler = (uint ctrlType) => {
             if (ctrlType == 5) return true; // CTRL_LOGOFF_EVENT: stay alive as SYSTEM service
-            if (!g_stop) {
+            if (!g_shutdown) {
+                g_shutdown = true;
                 g_stop = true;
                 g_needRestart = false;
                 if (g_activeCfg != null) {
@@ -1648,6 +1686,9 @@ class NvKeepAlive {
                 return 1;
             }
 
+            // Release discovery VkInstance before workers start (each Vulkan worker manages its own fresh instance)
+            if (vkInst != IntPtr.Zero) { try { vkDestroyInstance(vkInst, IntPtr.Zero); } catch {} vkInst = IntPtr.Zero; }
+
             var summaryParts = new List<string>();
             foreach (var ta in valid) summaryParts.Add(ta.CanonicalIndex + ":" + ta.Backend);
             LogEvent(cfg, true, "NV-KeepAlive v{0} started: targets=[{1}] blocks={2} threads={3} adaptive={4} yield={5}ms",
@@ -1686,7 +1727,7 @@ class NvKeepAlive {
             g_doneEvent.Set();
         }
 
-        if (g_needRestart && !g_stop) {
+        if (g_needRestart && !g_shutdown) {
             Thread.Sleep(1500);
             try {
                 var sb = new StringBuilder();
