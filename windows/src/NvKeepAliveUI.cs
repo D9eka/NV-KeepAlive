@@ -13,6 +13,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Shapes;
 using System.Windows.Threading;
@@ -54,6 +55,7 @@ namespace NvKeepAliveUI {
         public Brush RedBg, RedBorder, RedFg;
         public Brush BtnSecBg, BtnSecBorder, MiningBg, MiningFg, BlueBadgeBg, NeutralBadgeBg;
         public Brush ToggleOffBg, ToggleOffBorder, ToggleOffThumb;
+        public Brush ScrollTrack, ScrollThumb, ScrollThumbHover, ScrollThumbDrag;
 
         static SolidColorBrush Br(string hex) {
             var b = (SolidColorBrush)new BrushConverter().ConvertFromString(hex);
@@ -76,7 +78,8 @@ namespace NvKeepAliveUI {
             BtnSecBg = Br("#333333"), BtnSecBorder = Br("#444444"),
             MiningBg = Br("#362C1E"), MiningFg = Br("#F5B951"),
             BlueBadgeBg = Br("#1D3548"), NeutralBadgeBg = Br("#2F2F2F"),
-            ToggleOffBg = Br("#202020"), ToggleOffBorder = Br("#8C8C8C"), ToggleOffThumb = Br("#CCCCCC")
+            ToggleOffBg = Br("#202020"), ToggleOffBorder = Br("#8C8C8C"), ToggleOffThumb = Br("#CCCCCC"),
+            ScrollTrack = Br("#1A1A1A"), ScrollThumb = Br("#4A4A4A"), ScrollThumbHover = Br("#666666"), ScrollThumbDrag = Br("#808080")
         };
 
         public static readonly ThemePalette Light = new ThemePalette {
@@ -94,12 +97,13 @@ namespace NvKeepAliveUI {
             BtnSecBg = Br("#FFFFFF"), BtnSecBorder = Br("#CCCCCC"),
             MiningBg = Br("#FFF3DC"), MiningFg = Br("#9A5B00"),
             BlueBadgeBg = Br("#E5F1FB"), NeutralBadgeBg = Br("#EFEFEF"),
-            ToggleOffBg = Br("#FFFFFF"), ToggleOffBorder = Br("#767676"), ToggleOffThumb = Br("#555555")
+            ToggleOffBg = Br("#FFFFFF"), ToggleOffBorder = Br("#767676"), ToggleOffThumb = Br("#555555"),
+            ScrollTrack = Br("#EFEFEF"), ScrollThumb = Br("#BDBDBD"), ScrollThumbHover = Br("#9A9A9A"), ScrollThumbDrag = Br("#7A7A7A")
         };
     }
 
     public class MainWindow : Window {
-        const string Version = "1.1.0";
+        const string Version = "1.1.1";
         const string TaskName = "NV-KeepAlive";
         const string Gen2TaskName = "40HX PCIe Gen2 Bring-up";
         const string MutexName = "Global\\NvKeepAliveMutex";
@@ -200,7 +204,94 @@ namespace NvKeepAliveUI {
 
         Button _btnInstall, _btnPause, _btnTest, _btnRemove;
         StackPanel _testProgressWrap; TextBlock _testProgressLbl, _testProgressPct; ProgressBar _testProgressBar;
-        TextBlock _lblLogTitle; Button _btnOpenFolder; TextBox _logBox;
+        DockPanel _topBar, _logHead, _logSection;
+        Grid _outerGrid, _bodyGrid;
+        ColumnDefinition _bodyCol0, _bodyCol1;
+        RowDefinition _bodyRow0, _bodyRow1;
+        ScrollViewer _cardsScroll;
+        StackPanel _cardsPanel;
+        bool _isTwoCol = false;
+        bool _initialLayoutDone = false;
+        double _chromeH = 38;
+        TextBlock _lblLogTitle; Button _btnOpenFolder; Border _logWrap; TextBox _logBox;
+
+        static bool _scrollStylesInstalled = false;
+        static void InstallScrollStyles() {
+            if (_scrollStylesInstalled || Application.Current == null) return;
+            _scrollStylesInstalled = true;
+            try {
+                const string sbXaml =
+                    "<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml' TargetType='{x:Type ScrollBar}'>" +
+                    "  <Setter Property='SnapsToDevicePixels' Value='True'/>" +
+                    "  <Setter Property='OverridesDefaultStyle' Value='True'/>" +
+                    "  <Style.Triggers>" +
+                    "    <Trigger Property='Orientation' Value='Vertical'>" +
+                    "      <Setter Property='Width' Value='10'/>" +
+                    "      <Setter Property='MinWidth' Value='10'/>" +
+                    "      <Setter Property='Height' Value='Auto'/>" +
+                    "      <Setter Property='Template'><Setter.Value>" +
+                    "        <ControlTemplate TargetType='{x:Type ScrollBar}'>" +
+                    "          <Border Background='{DynamicResource ScrollTrackBrush}' Padding='2'>" +
+                    "            <Track x:Name='PART_Track' IsDirectionReversed='True'>" +
+                    "              <Track.DecreaseRepeatButton><RepeatButton Command='ScrollBar.PageUpCommand' Focusable='False' Opacity='0'/></Track.DecreaseRepeatButton>" +
+                    "              <Track.Thumb><Thumb Focusable='False'><Thumb.Template><ControlTemplate TargetType='{x:Type Thumb}'>" +
+                    "                <Border x:Name='th' Background='{DynamicResource ScrollThumbBrush}' CornerRadius='3' MinHeight='22'/>" +
+                    "                <ControlTemplate.Triggers>" +
+                    "                  <Trigger Property='IsMouseOver' Value='True'><Setter TargetName='th' Property='Background' Value='{DynamicResource ScrollThumbHoverBrush}'/></Trigger>" +
+                    "                  <Trigger Property='IsDragging' Value='True'><Setter TargetName='th' Property='Background' Value='{DynamicResource ScrollThumbDragBrush}'/></Trigger>" +
+                    "                </ControlTemplate.Triggers>" +
+                    "              </ControlTemplate></Thumb.Template></Thumb></Track.Thumb>" +
+                    "              <Track.IncreaseRepeatButton><RepeatButton Command='ScrollBar.PageDownCommand' Focusable='False' Opacity='0'/></Track.IncreaseRepeatButton>" +
+                    "            </Track>" +
+                    "          </Border>" +
+                    "        </ControlTemplate>" +
+                    "      </Setter.Value></Setter>" +
+                    "    </Trigger>" +
+                    "    <Trigger Property='Orientation' Value='Horizontal'>" +
+                    "      <Setter Property='Height' Value='10'/>" +
+                    "      <Setter Property='MinHeight' Value='10'/>" +
+                    "      <Setter Property='Width' Value='Auto'/>" +
+                    "      <Setter Property='Template'><Setter.Value>" +
+                    "        <ControlTemplate TargetType='{x:Type ScrollBar}'>" +
+                    "          <Border Background='{DynamicResource ScrollTrackBrush}' Padding='2'>" +
+                    "            <Track x:Name='PART_Track' IsDirectionReversed='False'>" +
+                    "              <Track.DecreaseRepeatButton><RepeatButton Command='ScrollBar.PageLeftCommand' Focusable='False' Opacity='0'/></Track.DecreaseRepeatButton>" +
+                    "              <Track.Thumb><Thumb Focusable='False'><Thumb.Template><ControlTemplate TargetType='{x:Type Thumb}'>" +
+                    "                <Border x:Name='th' Background='{DynamicResource ScrollThumbBrush}' CornerRadius='3' MinWidth='22'/>" +
+                    "                <ControlTemplate.Triggers>" +
+                    "                  <Trigger Property='IsMouseOver' Value='True'><Setter TargetName='th' Property='Background' Value='{DynamicResource ScrollThumbHoverBrush}'/></Trigger>" +
+                    "                  <Trigger Property='IsDragging' Value='True'><Setter TargetName='th' Property='Background' Value='{DynamicResource ScrollThumbDragBrush}'/></Trigger>" +
+                    "                </ControlTemplate.Triggers>" +
+                    "              </ControlTemplate></Thumb.Template></Thumb></Track.Thumb>" +
+                    "              <Track.IncreaseRepeatButton><RepeatButton Command='ScrollBar.PageRightCommand' Focusable='False' Opacity='0'/></Track.IncreaseRepeatButton>" +
+                    "            </Track>" +
+                    "          </Border>" +
+                    "        </ControlTemplate>" +
+                    "      </Setter.Value></Setter>" +
+                    "    </Trigger>" +
+                    "  </Style.Triggers>" +
+                    "</Style>";
+
+                const string svXaml =
+                    "<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml' TargetType='{x:Type ScrollViewer}'>" +
+                    "  <Setter Property='Template'><Setter.Value>" +
+                    "    <ControlTemplate TargetType='{x:Type ScrollViewer}'>" +
+                    "      <Grid Background='{TemplateBinding Background}'>" +
+                    "        <Grid.ColumnDefinitions><ColumnDefinition Width='*'/><ColumnDefinition Width='Auto'/></Grid.ColumnDefinitions>" +
+                    "        <Grid.RowDefinitions><RowDefinition Height='*'/><RowDefinition Height='Auto'/></Grid.RowDefinitions>" +
+                    "        <ScrollContentPresenter x:Name='PART_ScrollContentPresenter' Grid.Row='0' Grid.Column='0' Margin='{TemplateBinding Padding}' Content='{TemplateBinding Content}' ContentTemplate='{TemplateBinding ContentTemplate}' CanContentScroll='{TemplateBinding CanContentScroll}'/>" +
+                    "        <ScrollBar x:Name='PART_VerticalScrollBar' Grid.Row='0' Grid.Column='1' Orientation='Vertical' Value='{TemplateBinding VerticalOffset}' Maximum='{TemplateBinding ScrollableHeight}' ViewportSize='{TemplateBinding ViewportHeight}' Visibility='{TemplateBinding ComputedVerticalScrollBarVisibility}'/>" +
+                    "        <ScrollBar x:Name='PART_HorizontalScrollBar' Grid.Row='1' Grid.Column='0' Orientation='Horizontal' Value='{TemplateBinding HorizontalOffset}' Maximum='{TemplateBinding ScrollableWidth}' ViewportSize='{TemplateBinding ViewportWidth}' Visibility='{TemplateBinding ComputedHorizontalScrollBarVisibility}'/>" +
+                    "        <Border Grid.Row='1' Grid.Column='1' Background='{DynamicResource ScrollTrackBrush}'/>" +
+                    "      </Grid>" +
+                    "    </ControlTemplate>" +
+                    "  </Setter.Value></Setter>" +
+                    "</Style>";
+
+                Application.Current.Resources[typeof(System.Windows.Controls.Primitives.ScrollBar)] = (Style)XamlReader.Parse(sbXaml);
+                Application.Current.Resources[typeof(ScrollViewer)] = (Style)XamlReader.Parse(svXaml);
+            } catch {}
+        }
 
         public MainWindow(string initialThemeMode) {
             _isRu = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName.Equals("ru", StringComparison.OrdinalIgnoreCase);
@@ -210,16 +301,19 @@ namespace NvKeepAliveUI {
             _daemonSourceExe = FindDaemonExe();
 
             Title = "NV-KeepAlive v" + Version;
-            Width = 660;
-            MinWidth = 610;
+            Width = 735;
+            MinWidth = 735;
             SizeToContent = SizeToContent.Height;
-            MaxHeight = 820;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             FontFamily = new FontFamily("Segoe UI Variable, Segoe UI");
             FontSize = 13;
 
+            InstallScrollStyles();
+
             SourceInitialized += (s, e) => ApplyTitleBarTheme(this, _pal.IsDark);
             Loaded += OnLoaded;
+            ContentRendered += OnFirstRendered;
+            SizeChanged += (s, e) => { if (_initialLayoutDone) UpdateResponsiveLayout(false); };
             Closed += (s, e) => {
                 if (_pollTimer != null) _pollTimer.Stop();
                 try { SystemEvents.UserPreferenceChanged -= OnSystemPreferenceChanged; } catch {}
@@ -228,6 +322,64 @@ namespace NvKeepAliveUI {
 
             BuildUi();
             ApplyThemeToChrome();
+        }
+
+        void OnFirstRendered(object sender, EventArgs e) {
+            if (_initialLayoutDone) return;
+            _initialLayoutDone = true;
+            UpdateLayout();
+            double h = Math.Ceiling(ActualHeight);
+            double innerH = _outerGrid.ActualHeight + _outerGrid.Margin.Top + _outerGrid.Margin.Bottom;
+            if (h > innerH && (h - innerH) < 120) _chromeH = h - innerH;
+            double maxWorkH = Math.Max(420, SystemParameters.WorkArea.Height - 48);
+            SizeToContent = SizeToContent.Manual;
+            Height = Math.Min(h, maxWorkH);
+            UpdateResponsiveLayout(true);
+        }
+
+        void UpdateResponsiveLayout(bool force) {
+            bool wantTwoCol = ActualWidth >= 1120;
+            if (force || wantTwoCol != _isTwoCol) {
+                _isTwoCol = wantTwoCol;
+                if (_isTwoCol) {
+                    _bodyCol0.Width = new GridLength(705);
+                    _bodyCol1.Width = new GridLength(1, GridUnitType.Star);
+                    _bodyRow0.Height = new GridLength(1, GridUnitType.Star);
+                    _bodyRow1.Height = new GridLength(0);
+                    Grid.SetRow(_cardsScroll, 0); Grid.SetColumn(_cardsScroll, 0);
+                    _cardsScroll.VerticalAlignment = VerticalAlignment.Center;
+                    Grid.SetRow(_logSection, 0); Grid.SetColumn(_logSection, 1);
+                    _logSection.Margin = new Thickness(14, 0, 0, 0);
+                } else {
+                    _bodyCol0.Width = new GridLength(1, GridUnitType.Star);
+                    _bodyCol1.Width = new GridLength(0);
+                    _bodyRow0.Height = GridLength.Auto;
+                    _bodyRow1.Height = new GridLength(1, GridUnitType.Star);
+                    Grid.SetRow(_cardsScroll, 0); Grid.SetColumn(_cardsScroll, 0);
+                    _cardsScroll.VerticalAlignment = VerticalAlignment.Top;
+                    Grid.SetRow(_logSection, 1); Grid.SetColumn(_logSection, 0);
+                    _logSection.Margin = new Thickness(0, 2, 0, 0);
+                }
+            }
+            UpdateMinHeight();
+        }
+
+        void UpdateMinHeight() {
+            if (!_initialLayoutDone) return;
+            double maxWorkH = Math.Max(420, SystemParameters.WorkArea.Height - 48);
+            double topH = _topBar.ActualHeight + _topBar.Margin.Top + _topBar.Margin.Bottom;
+            double cardsH = _cardsPanel.ActualHeight;
+            double marginsH = _outerGrid.Margin.Top + _outerGrid.Margin.Bottom + _chromeH;
+            double minH;
+            if (_isTwoCol) {
+                minH = Math.Ceiling(topH + Math.Max(cardsH, 320) + marginsH);
+            } else {
+                double logHeadH = _logHead.ActualHeight + _logHead.Margin.Top + _logHead.Margin.Bottom + 4;
+                minH = Math.Ceiling(topH + cardsH + logHeadH + 110 + marginsH);
+            }
+            MinHeight = Math.Min(minH, maxWorkH);
+            if (WindowState == WindowState.Normal && Height < MinHeight)
+                Height = MinHeight;
         }
 
         ThemePalette ResolvePalette() {
@@ -321,11 +473,12 @@ namespace NvKeepAliveUI {
         }
 
         void BuildUi() {
-            var scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
-            var root = new StackPanel { Margin = new Thickness(16, 12, 16, 14) };
+            _outerGrid = new Grid { MaxWidth = 1560, Margin = new Thickness(16, 12, 16, 14) };
+            _outerGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            _outerGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
             // Top bar (Title + optional Update badge + Theme toggle + RU/EN toggle)
-            var topBar = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
+            _topBar = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
 
             var rightControls = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             _btnUpdate = new Button {
@@ -351,15 +504,19 @@ namespace NvKeepAliveUI {
             rightControls.Children.Add(_langBox);
 
             DockPanel.SetDock(rightControls, Dock.Right);
-            topBar.Children.Add(rightControls);
+            _topBar.Children.Add(rightControls);
 
             var titleRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             _titleDot = new Border { Width = 10, Height = 10, CornerRadius = new CornerRadius(2), Margin = new Thickness(0, 0, 8, 0) };
             _titleText = new TextBlock { Text = "NV-KeepAlive v" + Version, FontWeight = FontWeights.SemiBold, FontSize = 14 };
             titleRow.Children.Add(_titleDot);
             titleRow.Children.Add(_titleText);
-            topBar.Children.Add(titleRow);
-            root.Children.Add(topBar);
+            _topBar.Children.Add(titleRow);
+            Grid.SetRow(_topBar, 0);
+            _outerGrid.Children.Add(_topBar);
+
+            _cardsPanel = new StackPanel();
+            _cardsPanel.SizeChanged += (s, e) => { if (_initialLayoutDone) UpdateMinHeight(); };
 
             // ===== Block 1: GPUs, Backends, Live CPU & Daemon VRAM & Short-Window TDR =====
             var b1 = new StackPanel();
@@ -387,15 +544,25 @@ namespace NvKeepAliveUI {
             _lblFixVram = new TextBlock { FontSize = 11.5, Text = "VRAM: " };
             _valFixVram = new TextBlock { FontSize = 11.5, FontFamily = new FontFamily("Consolas"), FontWeight = FontWeights.Bold, Text = "-" };
             metricsSp.Children.Add(_lblStatusTitle); metricsSp.Children.Add(_dividerPipe);
-            metricsSp.Children.Add(_lblTdr5m); metricsSp.Children.Add(_valTdr5m);
-            metricsSp.Children.Add(_lblTdrStart); metricsSp.Children.Add(_valTdrStart);
-            metricsSp.Children.Add(_lblCpu); metricsSp.Children.Add(_valCpu);
-            metricsSp.Children.Add(_lblFixVram); metricsSp.Children.Add(_valFixVram);
+            Func<UIElement, UIElement, StackPanel> pair = (a, b) => {
+                var sp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+                sp.Children.Add(a); sp.Children.Add(b);
+                return sp;
+            };
+            metricsSp.Children.Add(pair(_lblTdr5m, _valTdr5m));
+            metricsSp.Children.Add(pair(_lblTdrStart, _valTdrStart));
+            metricsSp.Children.Add(pair(_lblCpu, _valCpu));
+            metricsSp.Children.Add(pair(_lblFixVram, _valFixVram));
             b1Head.Children.Add(metricsSp);
             b1.Children.Add(b1Head);
 
             _gpuListPanel = new StackPanel();
-            b1.Children.Add(_gpuListPanel);
+            b1.Children.Add(new ScrollViewer {
+                MaxHeight = 260,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Content = _gpuListPanel
+            });
 
             _pendingHintBox = new Border {
                 BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(5),
@@ -442,7 +609,7 @@ namespace NvKeepAliveUI {
 
             b1.Children.Add(legGrid);
             _cardMain = MakeCard(b1, new Thickness(12, 10, 12, 10));
-            root.Children.Add(_cardMain);
+            _cardsPanel.Children.Add(_cardMain);
 
             // ===== Block 2: PCIe Gen2 Unlock Sync + '?' =====
             var g2Dock = new DockPanel();
@@ -467,7 +634,7 @@ namespace NvKeepAliveUI {
             g2Left.Children.Add(g2Top); g2Left.Children.Add(_descGen2);
             g2Dock.Children.Add(g2Left);
             _gen2Card = MakeCard(g2Dock, new Thickness(12, 10, 12, 10));
-            root.Children.Add(_gen2Card);
+            _cardsPanel.Children.Add(_gen2Card);
 
             // ===== Block 3: GGML_VK_DISABLE_COOPMAT2 Toggle + Apply =====
             var cmDock = new DockPanel();
@@ -497,7 +664,7 @@ namespace NvKeepAliveUI {
             cmLeft.Children.Add(cmTop); cmLeft.Children.Add(_descCoopmat);
             cmDock.Children.Add(cmLeft);
             _coopmatCard = MakeCard(cmDock, new Thickness(12, 10, 12, 10));
-            root.Children.Add(_coopmatCard);
+            _cardsPanel.Children.Add(_coopmatCard);
 
             // ===== Block 4: Action Buttons =====
             var actGrid = new Grid { Margin = new Thickness(0, 0, 0, 8) };
@@ -519,7 +686,7 @@ namespace NvKeepAliveUI {
             Grid.SetColumn(_btnPause, 2);   actGrid.Children.Add(_btnPause);
             Grid.SetColumn(_btnTest, 4);    actGrid.Children.Add(_btnTest);
             Grid.SetColumn(_btnRemove, 6);  actGrid.Children.Add(_btnRemove);
-            root.Children.Add(actGrid);
+            _cardsPanel.Children.Add(actGrid);
 
             // Test Progress Bar
             _testProgressWrap = new StackPanel { Margin = new Thickness(0, 0, 0, 10), Visibility = Visibility.Collapsed };
@@ -532,36 +699,73 @@ namespace NvKeepAliveUI {
             _testProgressBar = new ProgressBar { Height = 6, Minimum = 0, Maximum = 100, BorderThickness = new Thickness(0) };
             _testProgressWrap.Children.Add(tpTop);
             _testProgressWrap.Children.Add(_testProgressBar);
-            root.Children.Add(_testProgressWrap);
+            _cardsPanel.Children.Add(_testProgressWrap);
 
-            // ===== Block 5: Event Log =====
-            var logHead = new DockPanel { Margin = new Thickness(0, 2, 0, 4) };
+            // ===== Block 5: Event Log (stretches vertically in 1-col, right column in 2-col) =====
+            _logSection = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 2, 0, 0) };
+            _logHead = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
             _btnOpenFolder = new Button { Padding = new Thickness(2, 0, 2, 0), FontSize = 11.5 };
             _btnOpenFolder.Click += (s, e) => {
                 try { Directory.CreateDirectory(InstallDir); Process.Start("explorer.exe", InstallDir); } catch {}
             };
             DockPanel.SetDock(_btnOpenFolder, Dock.Right);
-            logHead.Children.Add(_btnOpenFolder);
+            _logHead.Children.Add(_btnOpenFolder);
             _lblLogTitle = new TextBlock { FontSize = 11.5, FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center };
-            logHead.Children.Add(_lblLogTitle);
-            root.Children.Add(logHead);
+            _logHead.Children.Add(_lblLogTitle);
+            DockPanel.SetDock(_logHead, Dock.Top);
+            _logSection.Children.Add(_logHead);
 
             _logBox = new TextBox {
-                IsReadOnly = true, Height = 105, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap,
+                IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap,
+                VerticalAlignment = VerticalAlignment.Stretch, HorizontalAlignment = HorizontalAlignment.Stretch,
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-                BorderThickness = new Thickness(1),
+                BorderThickness = new Thickness(0),
                 FontFamily = new FontFamily("Cascadia Mono, Consolas"), FontSize = 11, Padding = new Thickness(8, 6, 8, 6)
             };
-            root.Children.Add(_logBox);
+            _logWrap = new Border {
+                MinHeight = 110, VerticalAlignment = VerticalAlignment.Stretch,
+                BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(1), Child = _logBox
+            };
+            _logSection.Children.Add(_logWrap);
 
-            scroll.Content = root;
-            Content = scroll;
+            _cardsScroll = new ScrollViewer {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                VerticalAlignment = VerticalAlignment.Top,
+                Content = _cardsPanel
+            };
+
+            _bodyGrid = new Grid();
+            _bodyCol0 = new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) };
+            _bodyCol1 = new ColumnDefinition { Width = new GridLength(0) };
+            _bodyRow0 = new RowDefinition { Height = GridLength.Auto };
+            _bodyRow1 = new RowDefinition { Height = new GridLength(1, GridUnitType.Star) };
+            _bodyGrid.ColumnDefinitions.Add(_bodyCol0);
+            _bodyGrid.ColumnDefinitions.Add(_bodyCol1);
+            _bodyGrid.RowDefinitions.Add(_bodyRow0);
+            _bodyGrid.RowDefinitions.Add(_bodyRow1);
+
+            Grid.SetRow(_cardsScroll, 0); Grid.SetColumn(_cardsScroll, 0);
+            Grid.SetRow(_logSection, 1);  Grid.SetColumn(_logSection, 0);
+            _bodyGrid.Children.Add(_cardsScroll);
+            _bodyGrid.Children.Add(_logSection);
+
+            Grid.SetRow(_bodyGrid, 1);
+            _outerGrid.Children.Add(_bodyGrid);
+            Content = _outerGrid;
         }
 
         void ApplyThemeToChrome() {
             ApplyTitleBarTheme(this, _pal.IsDark);
             Background = _pal.BgWindow;
             Foreground = _pal.FgPrimary;
+            if (Application.Current != null) {
+                Application.Current.Resources["ScrollTrackBrush"] = _pal.ScrollTrack;
+                Application.Current.Resources["ScrollThumbBrush"] = _pal.ScrollThumb;
+                Application.Current.Resources["ScrollThumbHoverBrush"] = _pal.ScrollThumbHover;
+                Application.Current.Resources["ScrollThumbDragBrush"] = _pal.ScrollThumbDrag;
+            }
 
             _titleDot.Background = _pal.Accent;
             _titleText.Foreground = _pal.FgPrimary;
@@ -607,9 +811,12 @@ namespace NvKeepAliveUI {
 
             _lblLogTitle.Foreground = _pal.FgMuted;
             _btnOpenFolder.Style = MakeButtonStyle(Brushes.Transparent, Brushes.Transparent, _pal.Accent, false);
+            _logWrap.Background = _pal.BgLog;
+            _logWrap.BorderBrush = _pal.BorderSubCard;
             _logBox.Background = _pal.BgLog;
             _logBox.Foreground = _pal.FgLog;
-            _logBox.BorderBrush = _pal.BorderSubCard;
+            _logBox.CaretBrush = _pal.FgLog;
+            _logBox.SelectionBrush = _pal.Accent;
         }
 
         // ===================== Startup, Update Check & Live Polling =====================
@@ -1104,7 +1311,9 @@ namespace NvKeepAliveUI {
                     Margin = new Thickness(0, 0, 0, 6)
                 };
 
-                var dock = new DockPanel();
+                var rowGrid = new Grid();
+                rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
                 var segBorder = new Border {
                     Background = _pal.BgSeg, BorderBrush = _pal.BorderSeg, BorderThickness = new Thickness(1),
@@ -1139,15 +1348,16 @@ namespace NvKeepAliveUI {
                 };
                 segSp.Children.Add(bVk); segSp.Children.Add(bCu);
                 segBorder.Child = segSp;
-                DockPanel.SetDock(segBorder, Dock.Right);
-                dock.Children.Add(segBorder);
+                Grid.SetColumn(segBorder, 1);
+                rowGrid.Children.Add(segBorder);
 
-                var leftSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+                var leftDock = new DockPanel { VerticalAlignment = VerticalAlignment.Center };
                 if (multi) {
                     var cb = new CheckBox { IsChecked = g.Selected, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
                     cb.Checked   += (s, e) => { g.Selected = true; RefreshTextsAndState(); };
                     cb.Unchecked += (s, e) => { g.Selected = false; RefreshTextsAndState(); };
-                    leftSp.Children.Add(cb);
+                    DockPanel.SetDock(cb, Dock.Left);
+                    leftDock.Children.Add(cb);
                 }
 
                 var infoSp = new StackPanel();
@@ -1168,18 +1378,20 @@ namespace NvKeepAliveUI {
 
                 string totVram = !string.IsNullOrEmpty(g.LiveTotalVram) ? g.LiveTotalVram : g.TotalVramMiB.ToString();
                 string pciPart = !string.IsNullOrEmpty(g.PciBusId) ? g.PciBusId : g.DeviceIdHex;
-                string pciePart = !string.IsNullOrEmpty(g.PcieText) ? ("  |  " + g.PcieText) : "";
+                string pciePart = !string.IsNullOrEmpty(g.PcieText) ? (" | " + g.PcieText) : "";
                 string fixPart = g.DaemonVramMiB.HasValue
                     ? string.Format(" ({0}: {1} MiB)", T("фикс", "fix"), g.DaemonVramMiB.Value.ToString("F1", CultureInfo.InvariantCulture))
                     : "";
                 infoSp.Children.Add(new TextBlock {
-                    Text = string.Format("{0}{1}  |  {2}/{3} MiB{4}  |  {5} C  |  {6} W", pciPart, pciePart, g.UsedVram, totVram, fixPart, g.TempC, g.PowerW),
-                    FontFamily = new FontFamily("Consolas"), FontSize = 11, Foreground = _pal.FgMuted, Margin = new Thickness(0, 2, 0, 0)
+                    Text = string.Format("{0}{1} | {2}/{3} MiB{4} | {5} C | {6} W", pciPart, pciePart, g.UsedVram, totVram, fixPart, g.TempC, g.PowerW),
+                    FontFamily = new FontFamily("Consolas"), FontSize = 11, Foreground = _pal.FgMuted,
+                    Margin = new Thickness(0, 2, 0, 0), TextTrimming = TextTrimming.CharacterEllipsis
                 });
-                leftSp.Children.Add(infoSp);
-                dock.Children.Add(leftSp);
+                leftDock.Children.Add(infoSp);
+                Grid.SetColumn(leftDock, 0);
+                rowGrid.Children.Add(leftDock);
 
-                row.Child = dock;
+                row.Child = rowGrid;
                 _gpuListPanel.Children.Add(row);
             }
         }

@@ -28,7 +28,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define NVK_VERSION "1.1.0"
+#define NVK_VERSION "1.1.1"
 
 /* ===================== CUDA Driver API types ===================== */
 typedef int CUresult;

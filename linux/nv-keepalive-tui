@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# NV-KeepAlive v1.1.0 - Interactive Linux Terminal Manager (TUI)
+# NV-KeepAlive v1.1.1 - Interactive Linux Terminal Manager (TUI)
 # Zero external dependencies (pure Bash + ANSI). Works on desktop terminals, SSH, and Live ISO.
 set -u
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_BIN="/usr/local/bin/nv-keepalive"
 TUI_DST="/usr/local/bin/nv-keepalive-tui"

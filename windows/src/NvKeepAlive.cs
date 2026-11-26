@@ -13,7 +13,7 @@ using System.Threading;
 // Supports per-GPU backend assignment (--targets 0:vulkan,1:cuda), NVML external-load yield,
 // graceful Windows shutdown handling, and built-in PCIe chipset-bridge Gen2 retrain (--retrain-gen2).
 class NvKeepAlive {
-    const string Version = "1.1.0";
+    const string Version = "1.1.1";
     const string MutexName = "Global\\NvKeepAliveMutex";
     const string RetrainMutexName = "Global\\NvKeepAliveGen2RetrainMutex";
     const long MaxLogBytes = 100 * 1024;
