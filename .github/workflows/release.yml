@@ -94,8 +94,8 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           if gh release view "${TAG}" >/dev/null 2>&1; then
-            gh release edit "${TAG}" --title "NV-KeepAlive ${TAG}" --notes-file RELEASE_NOTES.md
+            gh release edit "${TAG}" --draft=false --latest --title "NV-KeepAlive ${TAG}" --notes-file RELEASE_NOTES.md
             gh release upload "${TAG}" "${WIN_ARCHIVE}" "${LIN_ARCHIVE}" SHA256SUMS.txt --clobber
           else
-            gh release create "${TAG}" "${WIN_ARCHIVE}" "${LIN_ARCHIVE}" SHA256SUMS.txt --title "NV-KeepAlive ${TAG}" --notes-file RELEASE_NOTES.md
+            gh release create "${TAG}" "${WIN_ARCHIVE}" "${LIN_ARCHIVE}" SHA256SUMS.txt --latest --title "NV-KeepAlive ${TAG}" --notes-file RELEASE_NOTES.md
           fi
