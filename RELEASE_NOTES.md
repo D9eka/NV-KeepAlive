@@ -1,20 +1,20 @@
 ## English
 
-### What's New in v1.1.3
-- **Clean Windows reboot & shutdown (`0x10E` fix):** lowered shutdown priority (`SetProcessShutdownParameters(0x100, 0)`) so `NvKeepAlive.exe` protects the GPU until normal apps finish closing instead of exiting first.
-- **CMP 40HX EFI Unlock + Gen2 Sync stability:** stopped pausing `NvKeepAlive` during `40HXInstaller -gen2` and `--retrain-gen2` (preventing Stage 2 PnP-disable `0x10E` BSODs on EFI-unlocked `CPU-RM / GSP OFF` cards), improved `WinRing0Session` cleanup so it never stops an external driver instance, and added automatic stale `keepalive.pause` cleanup on boot plus faster pause polling (`300 ms`).
+### What's New in v1.1.4
+- **Automatic GPU disable/enable standby (Windows daemon):** detects disabled NVIDIA GPUs (`Code 22`) via `cfgmgr32.dll` (`0%` CPU, zero log spam), cleanly releases GPU contexts into standby when a GPU is disabled in Device Manager, and automatically resumes protection within ~2-3 seconds when re-enabled.
+- **Live GPU hot-refresh in Windows GUI:** hooks `WM_DEVICECHANGE` and live topology diffs to automatically update the GPU list, conditional CMP cards, and `Standby (no GPU)` status badge without restarting `NvKeepAliveUI.exe`.
 
 ### Windows 10 / 11
-1. Download and extract `NV-KeepAlive-Windows-v1.1.3.zip`.
+1. Download and extract `NV-KeepAlive-Windows-v1.1.4.zip`.
 2. Run `NvKeepAliveUI.exe`.
 3. Select GPU(s) and backend, then click **Install**.
 
 **Verification:** click **Test 25s**.
 
 ### Linux (Ubuntu / Debian / Arch / Fedora)
-1. Download `NV-KeepAlive-Linux-v1.1.3.tar.gz`, extract, and launch the TUI manager (or `install-linux.sh` for CLI install):
+1. Download `NV-KeepAlive-Linux-v1.1.4.tar.gz`, extract, and launch the TUI manager (or `install-linux.sh` for CLI install):
    ```bash
-   mkdir -p NV-KeepAlive && tar -xzf NV-KeepAlive-Linux-v1.1.3.tar.gz -C NV-KeepAlive
+   mkdir -p NV-KeepAlive && tar -xzf NV-KeepAlive-Linux-v1.1.4.tar.gz -C NV-KeepAlive
    cd NV-KeepAlive
    sudo bash nv-keepalive-tui
    ```
@@ -28,21 +28,21 @@ Full documentation: [README.md](https://github.com/D9eka/NV-KeepAlive/blob/main/
 
 ## Русский
 
-### Что нового в v1.1.3
-- **Чистая перезагрузка и выключение Windows (фикс `0x10E`):** приоритет завершения понижен до `SetProcessShutdownParameters(0x100, 0)`, чтобы `NvKeepAlive.exe` защищал GPU до закрытия обычных приложений, а не выходил первым.
-- **Стабильность с `CMP 40HX` EFI Unlock + Gen2 Sync:** убрана пауза KeepAlive на время `40HXInstaller -gen2` и `--retrain-gen2` (исключает BSOD `0x10E` от Stage 2 PnP-сброса на EFI-разлоченных картах `CPU-RM / GSP OFF`), `WinRing0Session` больше не останавливает чужой драйвер, добавлены автоочистка зависшего `keepalive.pause` при загрузке ОС и быстрая проверка паузы (`300 мс`).
+### Что нового в v1.1.4
+- **Авто-стоп/старт при отключении/включении видеокарты (Windows):** демон отслеживает состояние NVIDIA GPU через `cfgmgr32.dll` (`0%` CPU, без спама в лог) — при отключении карты в Диспетчере устройств (`Code 22`) сразу освобождает контекст и уходит в тихий режим ожидания, а при повторном включении сам возобновляет защиту за ~2–3 секунды.
+- **Живое обновление списка GPU в Windows GUI:** обработка `WM_DEVICECHANGE` и проверка изменений состава видеокарт автоматически обновляют список GPU, карточки `Gen2 Sync`/`CoopMat2` и бейдж `Ожидание GPU` без перезапуска `NvKeepAliveUI.exe`.
 
 ### Windows 10 / 11
-1. Скачайте и распакуйте `NV-KeepAlive-Windows-v1.1.3.zip`.
+1. Скачайте и распакуйте `NV-KeepAlive-Windows-v1.1.4.zip`.
 2. Запустите `NvKeepAliveUI.exe`.
 3. Выберите видеокарту и движок, нажмите **Установить**.
 
 **Проверка:** нажмите **Тест 25с**.
 
 ### Linux (Ubuntu / Debian / Arch / Fedora)
-1. Скачайте `NV-KeepAlive-Linux-v1.1.3.tar.gz`, распакуйте и запустите TUI-менеджер (либо `install-linux.sh` для установки из CLI):
+1. Скачайте `NV-KeepAlive-Linux-v1.1.4.tar.gz`, распакуйте и запустите TUI-менеджер (либо `install-linux.sh` для установки из CLI):
    ```bash
-   mkdir -p NV-KeepAlive && tar -xzf NV-KeepAlive-Linux-v1.1.3.tar.gz -C NV-KeepAlive
+   mkdir -p NV-KeepAlive && tar -xzf NV-KeepAlive-Linux-v1.1.4.tar.gz -C NV-KeepAlive
    cd NV-KeepAlive
    sudo bash nv-keepalive-tui
    ```

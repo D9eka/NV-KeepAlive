@@ -8,14 +8,14 @@ using System.Security;
 using System.Text;
 using System.Threading;
 
-// NV-KeepAlive v1.1.3 (Windows) - Minimalist, Zero-Dependency NVIDIA GPU KeepAlive
+// NV-KeepAlive v1.1.4 (Windows) - Minimalist, Zero-Dependency NVIDIA GPU KeepAlive
 // Backends (compiled into a single binary, zero SDK dependencies):
 //   1) Vulkan Compute (vulkan-1.dll + embedded SPIR-V 1.0) - ~5-20 MiB VRAM
 //   2) CUDA Driver API (nvcuda.dll + embedded PTX sm_50+)  - ~200-300 MiB VRAM
 // Supports per-GPU backend assignment (--targets 0:vulkan,1:cuda), NVML external-load yield,
 // graceful Windows shutdown handling, and built-in PCIe chipset-bridge Gen2 retrain (--retrain-gen2).
 class NvKeepAlive {
-    const string Version = "1.1.3";
+    const string Version = "1.1.4";
     const string MutexName = "Global\\NvKeepAliveMutex";
     const string RetrainMutexName = "Global\\NvKeepAliveGen2RetrainMutex";
     const long MaxLogBytes = 100 * 1024;
@@ -258,6 +258,48 @@ class NvKeepAlive {
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetConsoleCtrlHandler(ConsoleCtrlDelegate handler, bool add);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetProcessShutdownParameters(uint dwLevel, uint dwFlags);
     [DllImport("kernel32.dll")] static extern ulong GetTickCount64();
+
+    // ===================== Lightweight PnP GPU State (cfgmgr32.dll, 0% CPU) =====================
+    const uint CM_GETIDLIST_FILTER_PRESENT = 0x00000100;
+    const uint CM_GETIDLIST_FILTER_CLASS   = 0x00000200;
+    const uint CM_LOCATE_DEVNODE_NORMAL    = 0x00000000;
+    const uint DN_STARTED                  = 0x00000008;
+    const string DisplayClassGuid          = "{4d36e968-e325-11ce-bfc1-08002be10318}";
+
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern uint CM_Get_Device_ID_List_SizeW(out uint pulLen, string pszFilter, uint ulFlags);
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern uint CM_Get_Device_ID_ListW(string pszFilter, char[] Buffer, uint BufferLen, uint ulFlags);
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern uint CM_Locate_DevNodeW(out uint pdnDevInst, string pDeviceID, uint ulFlags);
+    [DllImport("cfgmgr32.dll")]
+    static extern uint CM_Get_DevNode_Status(out uint pulStatus, out uint pulProblemNumber, uint dnDevInst, uint ulFlags);
+
+    static void QueryNvidiaDisplayPnP(out bool anyPresent, out bool anyStarted) {
+        anyPresent = false;
+        anyStarted = false;
+        try {
+            uint len;
+            uint flags = CM_GETIDLIST_FILTER_CLASS | CM_GETIDLIST_FILTER_PRESENT;
+            if (CM_Get_Device_ID_List_SizeW(out len, DisplayClassGuid, flags) != 0 || len == 0) return;
+            char[] buf = new char[len];
+            if (CM_Get_Device_ID_ListW(DisplayClassGuid, buf, len, flags) != 0) return;
+            int start = 0;
+            for (int i = 0; i < buf.Length; i++) {
+                if (buf[i] != '\0') continue;
+                if (i == start) break;
+                string id = new string(buf, start, i - start);
+                start = i + 1;
+                if (id.IndexOf("VEN_10DE", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                anyPresent = true;
+                uint devInst, status, problem;
+                if (CM_Locate_DevNodeW(out devInst, id, CM_LOCATE_DEVNODE_NORMAL) == 0 &&
+                    CM_Get_DevNode_Status(out status, out problem, devInst, 0) == 0) {
+                    if ((status & DN_STARTED) != 0 && problem == 0) anyStarted = true;
+                }
+            }
+        } catch {}
+    }
     static ConsoleCtrlDelegate g_ctrlHandler = null;
     static readonly ManualResetEventSlim g_doneEvent = new ManualResetEventSlim(false);
     static Config g_activeCfg = null;
@@ -793,6 +835,7 @@ class NvKeepAlive {
             IntPtr dev = IntPtr.Zero;
             ulong buf = 0, mem = 0, dsl = 0, pl = 0, sm = 0, pipe = 0, dp = 0, ds = 0, cp = 0, fence = 0;
             GCHandle hCb = default(GCHandle);
+            bool enterStandby = false;
             try {
                 // Always create a fresh VkInstance & re-enumerate VkPhysicalDevice per cycle
                 // so a PCIe Gen2 reset (40HXInstaller) or WDDM TDR never leaves a stale PDev pointer.
@@ -990,16 +1033,23 @@ class NvKeepAlive {
                     if (cfg.SleepMs > 0) Thread.Sleep(cfg.SleepMs);
                 }
             } catch (Exception ex) {
-                recoveries++;
-                consecutiveFailures++;
-                bool fatalFault = (ex is AccessViolationException);
-                LogEvent(cfg, true, "[GPU {0}] Vulkan recovering (#{1}): {2}", cgpu.Index, recoveries, ex.Message);
-                if ((fatalFault || consecutiveFailures >= 3) && cfg.RunSec == 0) {
-                    LogEvent(cfg, true, "[GPU {0}] Vulkan handle lost after TDR/reset ({1}) - restarting fresh process...", cgpu.Index, ex.Message);
-                    g_needRestart = true;
-                    g_stop = true;
+                bool pAny, pStart;
+                QueryNvidiaDisplayPnP(out pAny, out pStart);
+                if (!pStart && cfg.RunSec == 0) {
+                    enterStandby = true;
+                    LogEvent(cfg, true, "[GPU {0}] NVIDIA GPU disabled/unavailable - releasing Vulkan context and entering 0% CPU standby.", cgpu.Index);
                 } else {
-                    Thread.Sleep(1500);
+                    recoveries++;
+                    consecutiveFailures++;
+                    bool fatalFault = (ex is AccessViolationException);
+                    LogEvent(cfg, true, "[GPU {0}] Vulkan recovering (#{1}): {2}", cgpu.Index, recoveries, ex.Message);
+                    if ((fatalFault || consecutiveFailures >= 3) && cfg.RunSec == 0) {
+                        LogEvent(cfg, true, "[GPU {0}] Vulkan handle lost after TDR/reset ({1}) - restarting fresh process...", cgpu.Index, ex.Message);
+                        g_needRestart = true;
+                        g_stop = true;
+                    } else {
+                        Thread.Sleep(1500);
+                    }
                 }
             } finally {
                 if (hCb.IsAllocated) hCb.Free();
@@ -1018,6 +1068,26 @@ class NvKeepAlive {
                 }
                 if (localInst != IntPtr.Zero) {
                     try { vkDestroyInstance(localInst, IntPtr.Zero); } catch {}
+                }
+            }
+
+            if (enterStandby) {
+                while (!g_stop && (cfg.RunSec == 0 || totalSw.Elapsed.TotalSeconds < cfg.RunSec)) {
+                    bool pAny, pStart;
+                    QueryNvidiaDisplayPnP(out pAny, out pStart);
+                    if (pStart) {
+                        LogEvent(cfg, true, "[GPU {0}] NVIDIA GPU re-enabled - restarting protection...", cgpu.Index);
+                        Thread.Sleep(1500);
+                        g_needRestart = true;
+                        g_stop = true;
+                        break;
+                    }
+                    if (!pAny) {
+                        LogEvent(cfg, true, "[GPU {0}] NVIDIA GPU physically removed - exiting cleanly.", cgpu.Index);
+                        g_stop = true;
+                        break;
+                    }
+                    Thread.Sleep(2000);
                 }
             }
         }
@@ -1046,6 +1116,7 @@ class NvKeepAlive {
             IntPtr ctx = IntPtr.Zero, mod = IntPtr.Zero;
             ulong dOut = 0;
             GCHandle hPtr = default(GCHandle), hIters = default(GCHandle);
+            bool enterStandby = false;
 
             try {
                 int dev, rc;
@@ -1137,16 +1208,23 @@ class NvKeepAlive {
                     if (cfg.SleepMs > 0) Thread.Sleep(cfg.SleepMs);
                 }
             } catch (Exception ex) {
-                recoveries++;
-                consecutiveFailures++;
-                bool fatalFault = (ex is AccessViolationException);
-                LogEvent(cfg, true, "[GPU {0}] CUDA recovering (#{1}): {2}", cgpu.Index, recoveries, ex.Message);
-                if ((fatalFault || consecutiveFailures >= 3) && cfg.RunSec == 0) {
-                    LogEvent(cfg, true, "[GPU {0}] CUDA driver handle poisoned after TDR/reset ({1}) - restarting fresh process...", cgpu.Index, ex.Message);
-                    g_needRestart = true;
-                    g_stop = true;
+                bool pAny, pStart;
+                QueryNvidiaDisplayPnP(out pAny, out pStart);
+                if (!pStart && cfg.RunSec == 0) {
+                    enterStandby = true;
+                    LogEvent(cfg, true, "[GPU {0}] NVIDIA GPU disabled/unavailable - releasing CUDA context and entering 0% CPU standby.", cgpu.Index);
                 } else {
-                    Thread.Sleep(1500);
+                    recoveries++;
+                    consecutiveFailures++;
+                    bool fatalFault = (ex is AccessViolationException);
+                    LogEvent(cfg, true, "[GPU {0}] CUDA recovering (#{1}): {2}", cgpu.Index, recoveries, ex.Message);
+                    if ((fatalFault || consecutiveFailures >= 3) && cfg.RunSec == 0) {
+                        LogEvent(cfg, true, "[GPU {0}] CUDA driver handle poisoned after TDR/reset ({1}) - restarting fresh process...", cgpu.Index, ex.Message);
+                        g_needRestart = true;
+                        g_stop = true;
+                    } else {
+                        Thread.Sleep(1500);
+                    }
                 }
             } finally {
                 if (hPtr.IsAllocated) hPtr.Free();
@@ -1154,6 +1232,26 @@ class NvKeepAlive {
                 try { if (dOut != 0) cuMemFree_v2(dOut); } catch {}
                 try { if (mod != IntPtr.Zero) cuModuleUnload(mod); } catch {}
                 try { if (ctx != IntPtr.Zero) cuCtxDestroy_v2(ctx); } catch {}
+            }
+
+            if (enterStandby) {
+                while (!g_stop && (cfg.RunSec == 0 || totalSw.Elapsed.TotalSeconds < cfg.RunSec)) {
+                    bool pAny, pStart;
+                    QueryNvidiaDisplayPnP(out pAny, out pStart);
+                    if (pStart) {
+                        LogEvent(cfg, true, "[GPU {0}] NVIDIA GPU re-enabled - restarting protection...", cgpu.Index);
+                        Thread.Sleep(1500);
+                        g_needRestart = true;
+                        g_stop = true;
+                        break;
+                    }
+                    if (!pAny) {
+                        LogEvent(cfg, true, "[GPU {0}] NVIDIA GPU physically removed - exiting cleanly.", cgpu.Index);
+                        g_stop = true;
+                        break;
+                    }
+                    Thread.Sleep(2000);
+                }
             }
         }
 
@@ -1668,10 +1766,28 @@ class NvKeepAlive {
         try {
             var totalSw = Stopwatch.StartNew();
             List<CanonicalGpu> gpus = null;
-            bool loggedWait = false, timedOut = false;
+            bool loggedWait = false, loggedStandby = false, timedOut = false;
             var waitSw = Stopwatch.StartNew();
 
             while (!g_stop && (cfg.RunSec == 0 || totalSw.Elapsed.TotalSeconds < cfg.RunSec)) {
+                bool pAny, pStart;
+                QueryNvidiaDisplayPnP(out pAny, out pStart);
+                if (pAny && !pStart && cfg.RunSec == 0) {
+                    if (!loggedStandby) {
+                        LogEvent(cfg, true, "NVIDIA GPU is disabled in Device Manager - entering 0% CPU standby until re-enabled.");
+                        loggedStandby = true;
+                    }
+                    Thread.Sleep(2000);
+                    waitSw.Restart();
+                    continue;
+                }
+                if (loggedStandby && pStart) {
+                    LogEvent(cfg, true, "NVIDIA GPU re-enabled - starting protection...");
+                    loggedStandby = false;
+                    Thread.Sleep(1500);
+                    waitSw.Restart();
+                }
+
                 if (vkInst != IntPtr.Zero) { try { vkDestroyInstance(vkInst, IntPtr.Zero); } catch {} vkInst = IntPtr.Zero; }
                 gpus = ProbeAllGpus(out vkInst);
                 if (gpus.Count > 0) break;

@@ -103,7 +103,7 @@ namespace NvKeepAliveUI {
     }
 
     public class MainWindow : Window {
-        const string Version = "1.1.3";
+        const string Version = "1.1.4";
         const string TaskName = "NV-KeepAlive";
         const string Gen2TaskName = "40HX PCIe Gen2 Bring-up";
         const string MutexName = "Global\\NvKeepAliveMutex";
@@ -179,7 +179,9 @@ namespace NvKeepAliveUI {
 
         // Polling & Test
         DispatcherTimer _pollTimer;
+        DispatcherTimer _devChangeTimer;
         volatile bool _pollBusy = false;
+        volatile bool _needGpuReprobe = false;
         volatile bool _testRunning = false;
         string _lastLogText = "";
 
@@ -310,18 +312,43 @@ namespace NvKeepAliveUI {
 
             InstallScrollStyles();
 
-            SourceInitialized += (s, e) => ApplyTitleBarTheme(this, _pal.IsDark);
+            SourceInitialized += (s, e) => {
+                ApplyTitleBarTheme(this, _pal.IsDark);
+                try {
+                    var src = HwndSource.FromVisual(this) as HwndSource;
+                    if (src != null) src.AddHook(WndProcHook);
+                } catch {}
+            };
             Loaded += OnLoaded;
             ContentRendered += OnFirstRendered;
             SizeChanged += (s, e) => { if (_initialLayoutDone) UpdateResponsiveLayout(false); };
             Closed += (s, e) => {
                 if (_pollTimer != null) _pollTimer.Stop();
+                if (_devChangeTimer != null) _devChangeTimer.Stop();
                 try { SystemEvents.UserPreferenceChanged -= OnSystemPreferenceChanged; } catch {}
                 DisposeVramCounters();
             };
 
             BuildUi();
             ApplyThemeToChrome();
+        }
+
+        IntPtr WndProcHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled) {
+            if (msg == 0x0219) { // WM_DEVICECHANGE
+                Dispatcher.BeginInvoke((Action)(() => {
+                    if (_devChangeTimer == null) {
+                        _devChangeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1200) };
+                        _devChangeTimer.Tick += (s, e) => {
+                            _devChangeTimer.Stop();
+                            _needGpuReprobe = true;
+                            TriggerBackgroundPoll();
+                        };
+                    }
+                    _devChangeTimer.Stop();
+                    _devChangeTimer.Start();
+                }));
+            }
+            return IntPtr.Zero;
         }
 
         void OnFirstRendered(object sender, EventArgs e) {
@@ -868,11 +895,8 @@ namespace NvKeepAliveUI {
             _coopmatDraft = _coopmatApplied;
         }
 
-        void ProbeInitialHardwareAndService() {
-            CheckVulkanNow();
-            ReadInstalledServiceConfig();
-
-            _gpus.Clear();
+        List<GpuItem> ProbeGpusList(string vkStatus, Dictionary<int, string> applied, Dictionary<string, GpuItem> prevByPci) {
+            var list = new List<GpuItem>();
             string outStr;
             int rc = RunProcessCapture(_daemonSourceExe, "--list-tsv", 6000, out outStr);
             if (rc == 0 && !string.IsNullOrEmpty(outStr)) {
@@ -893,29 +917,45 @@ namespace NvKeepAliveUI {
                         IsCmp40hx = p[6] == "1",
                         HasVulkan = p[7] == "1",
                         HasCuda = p[8] == "1",
-                        Backend = (p[7] == "1" && _vkCheckStatus == "OK") ? "vulkan" : "cuda"
+                        Backend = (p[7] == "1" && vkStatus == "OK") ? "vulkan" : "cuda"
                     };
-                    _gpus.Add(g);
+                    list.Add(g);
                 }
             }
 
-            if (_appliedTargets.Count > 0) {
-                foreach (var g in _gpus) {
-                    if (_appliedTargets.ContainsKey(g.Index)) {
+            if (applied != null && applied.Count > 0) {
+                foreach (var g in list) {
+                    if (applied.ContainsKey(g.Index)) {
                         g.Selected = true;
-                        g.Backend = _appliedTargets[g.Index];
+                        g.Backend = applied[g.Index];
                     } else {
-                        g.Selected = (_gpus.Count == 1);
+                        g.Selected = (list.Count == 1);
                     }
                 }
-            } else if (_gpus.Count == 1) {
-                _gpus[0].Selected = true;
-            } else if (_gpus.Count > 1) {
+            } else if (list.Count == 1) {
+                list[0].Selected = true;
+            } else if (list.Count > 1) {
                 bool anyMining = false;
-                foreach (var g in _gpus) if (g.IsMining) anyMining = true;
-                foreach (var g in _gpus) g.Selected = anyMining ? g.IsMining : true;
+                foreach (var g in list) if (g.IsMining) anyMining = true;
+                foreach (var g in list) g.Selected = anyMining ? g.IsMining : true;
             }
 
+            if (prevByPci != null && prevByPci.Count > 0) {
+                foreach (var g in list) {
+                    GpuItem old;
+                    if (!string.IsNullOrEmpty(g.PciBusId) && prevByPci.TryGetValue(g.PciBusId, out old)) {
+                        g.Selected = old.Selected;
+                        g.Backend = old.Backend;
+                    }
+                }
+            }
+            return list;
+        }
+
+        void ProbeInitialHardwareAndService() {
+            CheckVulkanNow();
+            ReadInstalledServiceConfig();
+            _gpus = ProbeGpusList(_vkCheckStatus, _appliedTargets, null);
             CheckGen2Status();
         }
 
@@ -1014,7 +1054,13 @@ namespace NvKeepAliveUI {
             if (_pollBusy) return;
             _pollBusy = true;
             var gpuLuids = new List<string>();
-            foreach (var g in _gpus) if (!string.IsNullOrEmpty(g.Luid)) gpuLuids.Add(g.Luid);
+            var prevByPci = new Dictionary<string, GpuItem>(StringComparer.OrdinalIgnoreCase);
+            int prevGpuCount = _gpus.Count;
+            var appliedSnap = new Dictionary<int, string>(_appliedTargets);
+            foreach (var g in _gpus) {
+                if (!string.IsNullOrEmpty(g.Luid)) gpuLuids.Add(g.Luid);
+                if (!string.IsNullOrEmpty(g.PciBusId)) prevByPci[g.PciBusId] = g;
+            }
             ThreadPool.QueueUserWorkItem(_ => {
                 try {
                     bool running = false;
@@ -1091,6 +1137,38 @@ namespace NvKeepAliveUI {
                         }
                     }
 
+                    // Hot-refresh GPU list if Device Manager enabled/disabled an NVIDIA GPU
+                    bool topoChanged = _needGpuReprobe || (smiList.Count != prevGpuCount);
+                    if (!topoChanged && smiMap.Count > 0) {
+                        foreach (string bus in smiMap.Keys) {
+                            if (!prevByPci.ContainsKey(bus)) { topoChanged = true; break; }
+                        }
+                    }
+                    List<GpuItem> reprobedGpus = null;
+                    string reprobedVk = null;
+                    if (topoChanged) {
+                        _needGpuReprobe = false;
+                        string vkOut;
+                        int vkRc = RunProcessCapture(_daemonSourceExe, "--check-vulkan", 5000, out vkOut);
+                        reprobedVk = (vkRc == 0 || (vkOut != null && vkOut.StartsWith("OK"))) ? "OK"
+                            : ((vkRc == 2 || (vkOut != null && vkOut.Contains("NO_LOADER"))) ? "NO_LOADER" : "NO_NVIDIA_ICD");
+                        reprobedGpus = ProbeGpusList(reprobedVk, appliedSnap, prevByPci);
+                        if (reprobedGpus.Count > 0 && running) {
+                            var newLuids = new List<string>();
+                            foreach (var rg in reprobedGpus) if (!string.IsNullOrEmpty(rg.Luid)) newLuids.Add(rg.Luid);
+                            daemonVramMap = ReadDaemonVramByLuid(daemonPid, newLuids);
+                            if (!paused && daemonVramMap.Count > 0) {
+                                double sumMiB = 0;
+                                foreach (var kv in daemonVramMap) sumMiB += kv.Value;
+                                fixVramTxt = sumMiB.ToString("F1", CultureInfo.InvariantCulture) + " MiB";
+                            }
+                        } else if (reprobedGpus.Count == 0 && running) {
+                            fixVramTxt = "0.0 MiB";
+                        }
+                    } else if (prevGpuCount == 0 && running) {
+                        fixVramTxt = "0.0 MiB";
+                    }
+
                     DateTime startRef = procStart ?? _sessionStart;
                     int tdr5 = CountNvlddmkmSince(DateTime.Now.AddMinutes(-5));
                     int tdrS = CountNvlddmkmSince(startRef);
@@ -1105,6 +1183,12 @@ namespace NvKeepAliveUI {
                     }
 
                     Dispatcher.BeginInvoke((Action)(() => {
+                        if (reprobedGpus != null) {
+                            _vkCheckStatus = reprobedVk;
+                            _gpus = reprobedGpus;
+                            if (_gpus.Count == 0) _gen2PcieSummary = "";
+                            CheckGen2Status();
+                        }
                         _serviceRunning = running;
                         _servicePaused = paused;
                         _liveCpuText = cpuTxt;
@@ -1191,6 +1275,7 @@ namespace NvKeepAliveUI {
         }
 
         bool HasPendingServiceChanges() {
+            if (_gpus.Count == 0) return false;
             return _serviceInstalled && !string.Equals(DraftTargetsSpec(), AppliedTargetsSpec(), StringComparison.OrdinalIgnoreCase);
         }
 
@@ -1227,7 +1312,12 @@ namespace NvKeepAliveUI {
             }
             string appSum = appParts.Count > 0 ? string.Join(", ", appParts.ToArray()) : "-";
 
-            if (_serviceRunning && !_servicePaused) {
+            if (_serviceRunning && !_servicePaused && _gpus.Count == 0) {
+                _statusPill.Background = _pal.YellowBg; _statusPill.BorderBrush = _pal.YellowBorder;
+                _statusDot.Fill = _pal.YellowFg; _statusText.Foreground = _pal.YellowFg;
+                _statusText.Text = T("Ожидание GPU", "Standby (no GPU)");
+                _btnPause.Content = T("Пауза", "Pause");
+            } else if (_serviceRunning && !_servicePaused) {
                 _statusPill.Background = _pal.GreenBg; _statusPill.BorderBrush = _pal.GreenBorder;
                 _statusDot.Fill = _pal.GreenFg; _statusText.Foreground = _pal.GreenFg;
                 _statusText.Text = T("Работает (" + appSum + ")", "Running (" + appSum + ")");
